@@ -46,6 +46,12 @@ html,body{margin:0;height:100%;background:#0d1a6e;font-family:system-ui,sans-ser
 .risk-panel b{color:#d4af37}.risk-panel .r{padding:2px 0;border-bottom:1px solid #ffffff22}.risk-panel .hi{color:#ff5a5a;font-weight:700}
 .train-label{background:#0d1a6e;color:#fff;border:1px solid #d4af37;font-weight:700;font-size:11px;padding:1px 4px}
 
+
+/* ===== موقعي: نقطة زرقاء للمستخدم الحالي ===== */
+.me-dot{position:relative;width:18px;height:18px;border-radius:50%;background:#1a73e8;border:3px solid #fff;box-shadow:0 0 0 2px #1a73e8,0 1px 6px #000a}
+.me-dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid #1a73e8;animation:mePulse 1.8s ease-out infinite}
+@keyframes mePulse{0%{transform:scale(1);opacity:.8}100%{transform:scale(2.8);opacity:0}}
+#meToast{position:fixed;left:50%;transform:translateX(-50%);top:calc(70px + env(safe-area-inset-top));z-index:3500;background:#0d1a6eF2;color:#fff;border:1px solid #d4af37;border-radius:12px;padding:8px 14px;font-size:13px;max-width:calc(100vw - 32px);text-align:center;display:none;direction:rtl}
 </style>
 </head>
 <body>
@@ -3609,6 +3615,403 @@ if('serviceWorker' in navigator){
   });
   try{ if(window.parent&&window.parent!==window) window.parent.postMessage({type:'f2-ready'},'*'); }catch(e){}
   window.__glv={refresh:refresh,places:places,cityOf:cityOf,readAll:readAll,advise:advRun,advKeys:advKeys};
+})();
+</script>
+
+<div id="meToast"></div>
+<script>
+/* ===== موقعي (Ma position) : كل من يفتح الصفحة يرى موقعه الحالي على الخريطة ===== */
+(function(){
+  var meMarker=null, meCircle=null, meLast=null, watchId=null, firstFix=true, toastTm=null;
+  var toast=document.getElementById('meToast');
+  function say(t,ms){
+    toast.textContent=t; toast.style.display='block';
+    clearTimeout(toastTm); toastTm=setTimeout(function(){ toast.style.display='none'; },ms||5000);
+  }
+  var btn=document.createElement('button'); btn.id='meBtn'; btn.textContent='📍'; btn.title='موقعي / Ma position';
+  var satB=document.getElementById('sat');
+  if(satB&&satB.parentNode) satB.parentNode.insertBefore(btn,satB.nextSibling); else document.getElementById('bar').appendChild(btn);
+
+  /* ===== لمس موقعك: اهتزاز + صوت « Tu es ici » — ولمس مكان آخر: توجيه صوتي نحو موقعك ===== */
+  var ME_SAY_TEXT='Tu es ici', ME_SAY_LANG='fr-FR', ME_TOUCH_PX=34, ME_NEAR_PX=100, lastSay=0, lastDir=0, guideOn=true;
+  function speak(t){
+    speechEpoch++;
+    try{
+      if(window.speechSynthesis){
+        window.speechSynthesis.cancel();
+        var u=new SpeechSynthesisUtterance(t);
+        u.lang=ME_SAY_LANG; u.rate=0.95; u.volume=1;
+        window.speechSynthesis.speak(u);
+      }
+    }catch(e){}
+  }
+  function buzz(pat){ try{ if(navigator.vibrate) navigator.vibrate(pat); }catch(e){} }
+  function announce(){
+    var now=Date.now(); if(now-lastSay<1500) return; lastSay=now;
+    buzz([250,120,250]);
+    speak(ME_SAY_TEXT);
+    say('📍 Tu es ici — أنت هنا',2500);
+    describeHere(false);
+  }
+  function guide(a,b){
+    var now=Date.now(); if(now-lastDir<700) return; lastDir=now;
+    var dx=a.x-b.x, dy=a.y-b.y, parts=[];
+    function part(d,neg,pos){
+      var ad=Math.abs(d); if(ad<=ME_TOUCH_PX) return;
+      parts.push((ad<=ME_NEAR_PX?'un peu ':'')+'plus '+(d<0?neg:pos));
+    }
+    part(dy,'en haut','en bas');
+    part(dx,'à gauche','à droite');
+    if(!parts.length) return;
+    var txt=parts.join(' et ');
+    txt=txt.charAt(0).toUpperCase()+txt.slice(1);
+    var sz=map.getSize();
+    if(a.x<0||a.y<0||a.x>sz.x||a.y>sz.y) txt='Ta position est hors de l\u2019écran. '+txt;
+    buzz(60);
+    speak(txt);
+    say('🧭 '+txt,2500);
+  }
+  var gBtn=document.createElement('button'); gBtn.id='meGuideBtn'; gBtn.textContent='🧭'; gBtn.title='التوجيه الصوتي / Guidage vocal';
+  btn.parentNode.insertBefore(gBtn,btn.nextSibling);
+  gBtn.onclick=function(){
+    guideOn=!guideOn; gBtn.style.opacity=guideOn?'1':'.45';
+    say(guideOn?'🧭 Guidage vocal activé':'🔇 Guidage vocal désactivé',2000);
+    if(!guideOn&&window.speechSynthesis){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+  };
+  map.on('click',function(ev){
+    var a=meLast?map.latLngToContainerPoint([meLast.lat,meLast.lon]):null, b=ev.containerPoint;
+    if(!a){ if(guideOn){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); } return; }
+    if(Math.hypot(a.x-b.x,a.y-b.y)<=ME_TOUCH_PX){ announce(); if(meMarker) meMarker.openPopup(); }
+    else if(guideOn) guide(a,b);
+  });
+  /* ===== لمس مقهى أو مطعم: الاسم + المسافة بالأمتار + الاتجاه (en haut / en bas / à gauche / à droite) ===== */
+  var FOOD_RE=/☕|🍽|🍴|🍔/;
+  function isFoodMarker(l){
+    if(!(l instanceof L.Marker)) return false;
+    var o=l.options&&l.options.icon&&l.options.icon.options; if(!o) return false;
+    if(o.className==='glv-logo') return true;
+    if(o.className!=='ala-poi') return false;
+    var h=String(o.html||'');
+    return FOOD_RE.test(h) || h.indexOf('d4af37')>-1;
+  }
+  function foodName(l){
+    var c=''; try{ var pp=l.getPopup&&l.getPopup(); c=pp?pp.getContent():''; }catch(e){}
+    if(typeof c!=='string') return '';
+    var first=c.split(/<br\s*\/?>/i)[0], d=document.createElement('div');
+    d.innerHTML=first;
+    return (d.textContent||'').replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF\uFE0F]/gu,'').replace(/\s+/g,' ').trim();
+  }
+  function foodKind(l){ var h=String((l.options.icon.options||{}).html||''); return h.indexOf('☕')>-1?'Café':'Restaurant'; }
+  function fmtM(d){
+    if(d<1000){ var n=Math.round(d); return n+(n<=1?' mètre':' mètres'); }
+    return (d/1000).toFixed(1).replace('.',',')+' kilomètres';
+  }
+  function dirWords(dx,dy){ /* dx: est(+) ouest(-) ، dy: nord(+) sud(-) — نفس اتجاهات الشاشة */
+    var ax=Math.abs(dx), ay=Math.abs(dy), v=dy>0?'en haut':'en bas', h=dx<0?'à gauche':'à droite';
+    if(ax<0.4*ay) return v;
+    if(ay<0.4*ax) return h;
+    return v+' '+h;
+  }
+  function placeInfo(l){
+    if(!guideOn) return;
+    var name=foodName(l), kind=foodKind(l), txt=kind+(name?' '+name:'');
+    if(!meLast){ txt+='. Ta position n\u2019est pas encore trouvée.'; }
+    else {
+      var ll=l.getLatLng(), dyM=(ll.lat-meLast.lat)*111320, dxM=(ll.lng-meLast.lon)*111320*Math.cos(meLast.lat*Math.PI/180);
+      var dist=Math.sqrt(dxM*dxM+dyM*dyM);
+      txt+='. '+(dist<10?'Tout près de toi, à ':'À ')+fmtM(dist)+(dist<10?'.':', '+dirWords(dxM,dyM)+'.');
+    }
+    buzz(80);
+    speak(txt);
+    say((kind==='Café'?'☕ ':'🍽️ ')+txt,5000);
+  }
+  function hookFood(l){
+    if(l._meFood||!isFoodMarker(l)) return;
+    l._meFood=1;
+    l.on('click',function(){ placeInfo(l); });
+  }
+  map.on('layeradd',function(e){ hookFood(e.layer); });
+  map.eachLayer(hookFood);
+  var meAcc=0;
+  function meHtml(){ return '<b>📍 موقعك الآن</b><br>Vous êtes ici'+(meAcc?'<br><small>± '+Math.round(meAcc)+' م</small>':'')+(meDescTxt?'<hr style="margin:6px 0"><small>'+esc(meDescTxt)+'</small>':''); }
+/*PURE_START*/
+function dNorm(t){ return String(t==null?'':t).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g,' ').trim(); }
+function dHav(la1,lo1,la2,lo2){ var R=6371000,r=Math.PI/180,a=la1*r,b=la2*r,dla=(la2-la1)*r,dlo=(lo2-lo1)*r; var h=Math.sin(dla/2)*Math.sin(dla/2)+Math.cos(a)*Math.cos(b)*Math.sin(dlo/2)*Math.sin(dlo/2); return 2*R*Math.asin(Math.sqrt(h)); }
+function dBearing(la1,lo1,la2,lo2){ var r=Math.PI/180,dlo=(lo2-lo1)*r,y=Math.sin(dlo)*Math.cos(la2*r),x=Math.cos(la1*r)*Math.sin(la2*r)-Math.sin(la1*r)*Math.cos(la2*r)*Math.cos(dlo); return (Math.atan2(y,x)/r+360)%360; }
+var D_CARD=['nord','nord-est','est','sud-est','sud','sud-ouest','ouest','nord-ouest'];
+function dVers(b){ var c=D_CARD[Math.round(b/45)%8]; return (c==='est'||c==='ouest')?'vers l\u2019'+c:'vers le '+c; }
+function dFmt(d){
+  if(d<1000){ var n=d<100?Math.round(d):Math.round(d/10)*10; return n+(n<=1?' mètre':' mètres'); }
+  var k=d/1000; return (k<10?k.toFixed(1).replace('.',','):String(Math.round(k)))+' kilomètres';
+}
+function dFmtN(n){ return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,' '); }
+function dRoundPop(n){ if(n>=100000) return Math.round(n/10000)*10000; if(n>=10000) return Math.round(n/1000)*1000; if(n>=1000) return Math.round(n/100)*100; return Math.round(n/10)*10; }
+function dSeg(lat,lon,a,b){
+  var k=111320, c=Math.cos(lat*Math.PI/180);
+  var ax=(a.lon-lon)*k*c, ay=(a.lat-lat)*k, bx=(b.lon-lon)*k*c, by=(b.lat-lat)*k;
+  var dx=bx-ax, dy=by-ay, L2=dx*dx+dy*dy, t=L2?Math.max(0,Math.min(1,-(ax*dx+ay*dy)/L2)):0;
+  var px=ax+dx*t, py=ay+dy*t;
+  return {d:Math.sqrt(px*px+py*py), lat:lat+py/k, lon:lon+px/(k*c)};
+}
+function dRing(lat,lon){
+  var pts=[[lat,lon]], c=Math.cos(lat*Math.PI/180);
+  [3000,8000].forEach(function(R){ for(var b=0;b<360;b+=45){ var br=b*Math.PI/180; pts.push([lat+(R*Math.cos(br))/111320, lon+(R*Math.sin(br))/(111320*c)]); } });
+  return pts;
+}
+function dParseOvp(j,lat,lon){
+  var o={places:[],peaks:[],coast:null,land:{},bld:null};
+  ((j&&j.elements)||[]).forEach(function(e){
+    var t=e.tags||{};
+    if(e.type==='count'){ o.bld=+t.total||0; return; }
+    if(e.type==='area'){ if(t.landuse) o.land[t.landuse]=1; if(t.natural) o.land['n:'+t.natural]=1; return; }
+    if(e.type==='node'&&e.lat!=null&&t.place){ o.places.push({type:t.place,tags:t,lat:e.lat,lon:e.lon,d:dHav(lat,lon,e.lat,e.lon)}); return; }
+    if(e.type==='node'&&e.lat!=null&&t.natural==='peak'){ o.peaks.push({name:t.name||t['name:fr']||'',ele:parseFloat(String(t.ele||'').replace(',','.')),lat:e.lat,lon:e.lon,d:dHav(lat,lon,e.lat,e.lon)}); return; }
+    if(e.type==='way'&&t.natural==='coastline'&&e.geometry){
+      var g=e.geometry;
+      for(var i=0;i<g.length-1;i++){
+        var a=g[i], b=g[i+1]; if(!a||!b) continue;
+        var r=dSeg(lat,lon,a,b); if(!o.coast||r.d<o.coast.d) o.coast=r;
+      }
+    }
+  });
+  if(o.coast) o.coast.b=dBearing(lat,lon,o.coast.lat,o.coast.lon);
+  return o;
+}
+function dPickSettlement(nom,ov){
+  var addr=(nom&&nom.address)||{}, order=['city','town','village','municipality','hamlet'], pref={city:1,town:1,village:1,hamlet:1};
+  var main=ov.places.filter(function(p){ return pref[p.type]; });
+  var keys=['name','name:fr','name:en','name:ar','int_name','official_name'];
+  for(var i=0;i<order.length;i++){
+    var nm=dNorm(addr[order[i]]); if(!nm) continue;
+    var hits=main.filter(function(p){ return keys.some(function(k){ return p.tags[k]&&dNorm(p.tags[k])===nm; }); });
+    if(hits.length){ hits.sort(function(a,b){ return a.d-b.d; }); return {p:hits[0],matched:true}; }
+  }
+  main.sort(function(a,b){ return a.d-b.d; });
+  if(main.length&&main[0].d<=12000) return {p:main[0],matched:false};
+  return null;
+}
+function dPopFromTags(t){ var n=parseInt(String(t&&t.population||'').replace(/[^\d]/g,''),10); return isFinite(n)&&n>0?n:null; }
+function dPopPhrase(pop,type){
+  if(pop!=null){
+    var t=pop>=300000?'une très grande ville':pop>=100000?'une grande ville':pop>=30000?'une ville moyenne':pop>=10000?'une petite ville':pop>=2000?'un bourg':pop>=300?'un village':'un petit village';
+    return t+' d\u2019environ '+dFmtN(dRoundPop(pop))+' habitants';
+  }
+  var u={city:'une ville',town:'une ville',village:'un village',hamlet:'un hameau'}[type]||'une localité';
+  return u+' dont la population n\u2019est pas indiquée';
+}
+var D_LAND=[['residential','quartier résidentiel'],['commercial','zone commerciale'],['retail','zone commerciale'],['industrial','zone industrielle'],['farmland','terres agricoles'],['orchard','vergers'],['vineyard','vignes'],['forest','forêt'],['n:wood','zone boisée'],['meadow','prairie'],['n:grassland','prairie'],['n:sand','sable'],['n:desert','désert'],['n:scrub','broussailles'],['n:bare_rock','terrain rocheux'],['n:wetland','zone humide'],['quarry','carrière'],['salt_pond','marais salants'],['cemetery','cimetière'],['military','zone militaire'],['construction','chantier'],['grass','espace vert'],['recreation_ground','zone de loisirs'],['n:heath','lande'],['n:scree','éboulis']];
+function dBuild(lat,lon,nom,ov,elev,pop,st){
+  var out=[], addr=(nom&&nom.address)||{};
+  /* 1) où suis-je */
+  var place=addr.city||addr.town||addr.village||addr.municipality||addr.hamlet||'';
+  var sub=addr.suburb||addr.neighbourhood||addr.city_district||'', state=addr.state||'';
+  if(place){
+    var s='Tu es à '+place;
+    if(sub&&dNorm(sub)!==dNorm(place)) s+=', quartier '+sub;
+    if(state&&dNorm(state)!==dNorm(place)) s+=', '+state;
+    out.push(s+'.');
+  } else if(st&&st.p){
+    out.push('Tu es près de '+(st.p.tags['name:fr']||st.p.tags.name||'une localité')+', à '+dFmt(st.p.d)+'.');
+  } else if(state){
+    out.push('Tu es dans '+state+', en dehors de toute localité connue.');
+  }
+  /* 2) type de lieu + nombre d'habitants */
+  if(st&&st.p){
+    var ph=dPopPhrase(pop,st.p.type);
+    if(st.matched||!place) out.push('C\u2019est '+ph+'.');
+    else if(st.p.d<=3000) out.push('La localité la plus proche, '+(st.p.tags['name:fr']||st.p.tags.name||'')+', à '+dFmt(st.p.d)+', est '+ph+'.');
+  }
+  /* 3) bâti */
+  if(ov&&ov.bld!=null){
+    var b=ov.bld;
+    out.push(b===0?'Aucun bâtiment à moins de 250 mètres : zone ouverte.':b<=10?'Quelques bâtiments isolés autour de toi.':b<=60?'Zone peu bâtie, habitat dispersé.':b<=200?'Zone bâtie, de densité moyenne.':'Zone urbaine dense.');
+  }
+  /* 4) occupation du sol */
+  if(ov&&ov.localOk){
+    var ph2=[]; D_LAND.forEach(function(x){ if(ov.land[x[0]]&&ph2.indexOf(x[1])<0) ph2.push(x[1]); });
+    if(ph2.length) out.push('Autour de toi : '+ph2.slice(0,3).join(', ')+'.');
+  }
+  /* 5) mer */
+  if(ov&&(ov.coast||ov.coastOk)){
+    if(ov.coast){
+      var cd=ov.coast.d;
+      out.push(cd<=150?'Tu es au bord de la mer.':cd<=1000?'La mer est tout près, à '+dFmt(cd)+', '+dVers(ov.coast.b)+'.':'La mer est à '+dFmt(cd)+', '+dVers(ov.coast.b)+'.');
+    } else out.push('Pas de mer à moins de 25 kilomètres.');
+  }
+  /* 6) altitude et relief */
+  if(elev){
+    var vals=elev.filter(function(v){ return typeof v==='number'&&isFinite(v); });
+    if(typeof elev[0]==='number'&&vals.length>=6){
+      var c0=elev[0], mn=Math.min.apply(null,vals), mx=Math.max.apply(null,vals), rel=mx-mn;
+      var ring=elev.slice(1).filter(function(v){ return typeof v==='number'&&isFinite(v); });
+      var avg=ring.reduce(function(a,v){ return a+v; },0)/(ring.length||1);
+      var s2='Altitude : '+Math.round(c0)+' mètres. ';
+      s2+=rel<25?'Le terrain est plat.':rel<80?'Le terrain est légèrement vallonné.':rel<200?'Le relief est vallonné.':rel<500?'Le relief est accidenté, avec des collines ou des montagnes aux alentours.':'Tu es dans une région montagneuse, avec un dénivelé d\u2019environ '+dFmtN(Math.round(rel/10)*10)+' mètres autour de toi.';
+      if(rel>=80){ if(c0-avg>40) s2+=' Tu te trouves sur une hauteur.'; else if(c0-avg<-40) s2+=' Tu te trouves dans une vallée ou une cuvette.'; }
+      out.push(s2);
+    }
+  }
+  /* 7) montagne la plus proche */
+  if(ov&&ov.localOk&&ov.peaks.length){
+    var pk=ov.peaks.filter(function(p){ return p.d<=15000&&(p.name||isFinite(p.ele)); }).sort(function(a,b){ return (b.name?1:0)-(a.name?1:0)||a.d-b.d; })[0];
+    if(pk){
+      var br=dVers(dBearing(lat,lon,pk.lat,pk.lon));
+      out.push(pk.name?('Le sommet '+pk.name+(isFinite(pk.ele)?', '+Math.round(pk.ele)+' mètres,':'')+' est à '+dFmt(pk.d)+', '+br+'.'):('Un sommet de '+Math.round(pk.ele)+' mètres est à '+dFmt(pk.d)+', '+br+'.'));
+    }
+  }
+  return out.join(' ');
+}
+/*PURE_END*/
+
+  /* ===== وصف شامل للمكان: المدينة وعدد السكان، البحر، الجبال، الارتفاع، كثافة البناء ===== */
+  var speechEpoch=0, descBusy=false, descForce=false, descCache={}, DESC_TTL=15*60000, meDescTxt='';
+  function jget(url,ms){
+    var ctl=new AbortController(), tm=setTimeout(function(){ ctl.abort(); },ms||12000);
+    return fetch(url,{signal:ctl.signal}).then(function(r){ clearTimeout(tm); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); },function(e){ clearTimeout(tm); throw e; });
+  }
+  var OVP_EPS=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
+  function ovpOne(ep,q){
+    var ctl=new AbortController(), tm=setTimeout(function(){ ctl.abort(); },15000);
+    return fetch(ep,{method:'POST',body:'data='+encodeURIComponent(q),signal:ctl.signal}).then(function(r){
+      clearTimeout(tm); if(!r.ok) throw new Error('HTTP '+r.status); return r.json();
+    },function(e){ clearTimeout(tm); throw e; }).then(function(j){
+      if(j&&j.remark&&/runtime error|timed out|out of memory/i.test(j.remark)) throw new Error('serveur surchargé');
+      return j;
+    });
+  }
+  function firstOk(ps){
+    return new Promise(function(res,rej){
+      var n=ps.length, first=null;
+      ps.forEach(function(p){ p.then(res,function(e){ if(!first) first=e; if(--n===0) rej(first); }); });
+    });
+  }
+  function ovp(q){ return firstOk(OVP_EPS.map(function(ep){ return ovpOne(ep,q); })); }
+  /* طلبان خفيفان بدل طلب واحد ثقيل: المحيط القريب (سكان/جبال/استعمال الأرض/مباني) ثم الساحل */
+  function ovpQueryLocal(lat,lon){
+    return '[out:json][timeout:12];'
+      +'node["place"~"^(city|town|village|hamlet|suburb|neighbourhood|quarter)$"](around:12000,'+lat+','+lon+');out body;'
+      +'node["natural"="peak"](around:15000,'+lat+','+lon+');out body;'
+      +'is_in('+lat+','+lon+')->.a;(area.a["landuse"];area.a["natural"];);out tags;'
+      +'nwr["building"](around:250,'+lat+','+lon+');out count;';
+  }
+  function ovpQueryCoast(lat,lon){
+    var s=(lat-0.25).toFixed(4), n=(lat+0.25).toFixed(4), w=(lon-0.3).toFixed(4), e=(lon+0.3).toFixed(4), bb=s+','+w+','+n+','+e;
+    return '[out:json][timeout:12];way["natural"="coastline"]('+bb+');out geom('+bb+');';
+  }
+  function wikiPop(q){
+    return jget('https://www.wikidata.org/w/api.php?action=wbgetclaims&entity='+encodeURIComponent(q)+'&property=P1082&format=json&origin=*',7000).then(function(j){
+      var best=null;
+      ((j&&j.claims&&j.claims.P1082)||[]).forEach(function(c){
+        try{
+          var a=parseFloat(c.mainsnak.datavalue.value.amount), rk=c.rank==='preferred'?2:(c.rank==='normal'?1:0);
+          var tm=(c.qualifiers&&c.qualifiers.P585&&c.qualifiers.P585[0].datavalue.value.time)||'';
+          if(!rk||!isFinite(a)||a<=0) return;
+          if(!best||rk>best.rk||(rk===best.rk&&tm>best.tm)) best={a:a,rk:rk,tm:tm};
+        }catch(e){}
+      });
+      return best?best.a:null;
+    });
+  }
+  function speakAdd(t){
+    try{
+      if(!window.speechSynthesis) return;
+      (String(t).match(/[^.!?]+[.!?]*/g)||[]).forEach(function(sn){
+        if(!sn.trim()) return;
+        var u=new SpeechSynthesisUtterance(sn.trim()); u.lang=ME_SAY_LANG; u.rate=0.95; u.volume=1;
+        window.speechSynthesis.speak(u);
+      });
+    }catch(e){}
+  }
+  function showDesc(txt,note){
+    meDescTxt=txt;
+    try{ if(meMarker&&meLast) meMarker.setPopupContent(meHtml()); }catch(e){}
+    speakAdd(txt+(note?' Certaines informations n\u2019ont pas pu être chargées.':''));
+    say('🌍 '+txt+(note?' — ⚠️ '+note:''),20000);
+  }
+  function errMsg(r){ var e=r&&r.reason; return (e&&(e.name==='AbortError'?'délai dépassé':e.message))||'échec'; }
+  async function describeHere(force){
+    if(!meLast){ if(force){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); } return; }
+    if(!force&&!guideOn) return;
+    var lat=meLast.lat, lon=meLast.lon, key=lat.toFixed(3)+','+lon.toFixed(3), hit=descCache[key];
+    if(hit&&Date.now()-hit.t<DESC_TTL){ showDesc(hit.txt,''); return; }
+    if(descBusy){ if(force) say('🌍 Analyse en cours, un instant…',4000); return; }
+    descBusy=true;
+    say('🌍 Analyse du lieu… (quelques secondes)',20000);
+    try{
+      var pts=dRing(lat,lon);
+      var rs=await Promise.allSettled([
+        jget('https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=14&accept-language=fr&lat='+lat+'&lon='+lon,12000),
+        ovp(ovpQueryLocal(lat,lon)),
+        ovp(ovpQueryCoast(lat,lon)),
+        jget('https://api.open-meteo.com/v1/elevation?latitude='+pts.map(function(p){ return p[0].toFixed(5); }).join(',')+'&longitude='+pts.map(function(p){ return p[1].toFixed(5); }).join(','),12000)
+      ]);
+      var names=['adresse','bâti/habitants/montagnes','mer','altitude'], fails=[];
+      rs.forEach(function(r,i){ if(r.status!=='fulfilled'){ fails.push(names[i]+' ('+errMsg(r)+')'); try{ console.warn('describe',names[i],r.reason); }catch(e){} } });
+      var nom=rs[0].status==='fulfilled'?rs[0].value:null, ov=null;
+      if(rs[1].status==='fulfilled'||rs[2].status==='fulfilled'){
+        ov={places:[],peaks:[],coast:null,land:{},bld:null,coastOk:false,localOk:false};
+        if(rs[1].status==='fulfilled'){ var A=dParseOvp(rs[1].value,lat,lon); ov.places=A.places; ov.peaks=A.peaks; ov.land=A.land; ov.bld=A.bld; ov.localOk=true; }
+        if(rs[2].status==='fulfilled'){ var B=dParseOvp(rs[2].value,lat,lon); ov.coast=B.coast; ov.coastOk=true; }
+      }
+      var elev=rs[3].status==='fulfilled'&&rs[3].value&&Array.isArray(rs[3].value.elevation)?rs[3].value.elevation:null;
+      if(!nom&&!ov&&!elev){
+        var m='Impossible de décrire le lieu. Vérifie ta connexion Internet.';
+        speakAdd(m); say('⚠️ '+m+' — '+fails.join(', '),20000);
+        return;
+      }
+      var st=(ov&&ov.localOk)?dPickSettlement(nom,ov):null, pop=null;
+      if(st){
+        pop=dPopFromTags(st.p.tags);
+        if(pop==null&&st.p.tags.wikidata){ try{ pop=await wikiPop(st.p.tags.wikidata); }catch(e){ pop=null; } }
+      }
+      var txt=dBuild(lat,lon,nom,ov,elev,pop,st);
+      if(!txt) txt='Je n\u2019ai pas pu décrire ce lieu.';
+      else if(!fails.length) descCache[key]={t:Date.now(),txt:txt};
+      showDesc(txt,fails.join(', '));
+    }catch(e){
+      try{ console.warn('describe',e); }catch(x){}
+      speakAdd('Impossible de décrire le lieu.'); say('⚠️ Impossible de décrire le lieu : '+(e&&e.message||e),15000);
+    }finally{ descBusy=false; }
+  }
+  var dBtn=document.createElement('button'); dBtn.id='meDescBtn'; dBtn.textContent='🌍'; dBtn.title='وصف المكان / Décrire le lieu';
+  gBtn.parentNode.insertBefore(dBtn,gBtn.nextSibling);
+  dBtn.onclick=function(){ if(!meLast){ describeHere(true); return; } speak('Description du lieu.'); describeHere(true); };
+  function onPos(p){
+    var lat=p.coords.latitude, lon=p.coords.longitude, acc=p.coords.accuracy||0;
+    meLast={lat:lat,lon:lon};
+    meAcc=acc; var html=meHtml();
+    if(!meMarker){
+      meMarker=L.marker([lat,lon],{
+        icon:L.divIcon({className:'',html:'<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><div class="me-dot"></div></div>',iconSize:[44,44],iconAnchor:[22,22]}),
+        zIndexOffset:100000
+      }).addTo(map).bindPopup(html);
+      meMarker.on('click',announce);
+      meCircle=L.circle([lat,lon],{radius:acc,color:'#1a73e8',weight:1,fillColor:'#1a73e8',fillOpacity:.12,interactive:false}).addTo(map);
+    } else {
+      meMarker.setLatLng([lat,lon]); meMarker.setPopupContent(html);
+      meCircle.setLatLng([lat,lon]); meCircle.setRadius(acc);
+    }
+    if(firstFix){
+      firstFix=false;
+      try{ fitted=true; }catch(e){}   /* لا نترك fitBounds الخاص بالمستخدمين يسحب الخريطة بعيداً عن موقعك */
+      map.setView([lat,lon],Math.max(map.getZoom(),15));
+    }
+  }
+  function onErr(e){
+    if(e&&e.code===1) say('⚠️ تم رفض إذن الموقع — فعّله من إعدادات المتصفح (Autorisez la localisation)',7000);
+    else if(e&&e.code===3) say('⏳ تعذّر تحديد موقعك في الوقت المحدد، سنعيد المحاولة…',4000);
+    else say('⚠️ تعذّر تحديد موقعك',5000);
+  }
+  function start(){
+    if(!navigator.geolocation){ say('⚠️ المتصفح لا يدعم تحديد الموقع',5000); return; }
+    if(watchId!=null) return;
+    watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:2000,timeout:15000});
+  }
+  btn.onclick=function(){
+    if(meLast){ map.setView([meLast.lat,meLast.lon],Math.max(map.getZoom(),16)); if(meMarker) meMarker.openPopup(); }
+    else { start(); say('📡 جارٍ تحديد موقعك…',3000); }
+  };
+  start();
 })();
 </script>
 </body>
