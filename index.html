@@ -4141,11 +4141,21 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     var own=typeof lat!=='number';
     if(own){ if(!meLast){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); return; } lat=meLast.lat; lon=meLast.lon; }
     svPos=own?null:{lat:lat,lon:lon};
+    svLast=own?{lat:lat,lon:lon}:null;
     svUi().style.display='block';
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     speak('Street View. Je regarde le lieu.');
     describeHere(true,svPos);
+  }
+  var svLast=null;
+  function svFollow(lat,lon){
+    if(!svBox||svBox.style.display==='none'||svPos) return;
+    if(svLast&&map.distance([svLast.lat,svLast.lon],[lat,lon])<15) return;
+    svLast={lat:lat,lon:lon};
+    document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
+    document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
+    describeHere(true,null);
   }
   /* طبقة تغطية Street View (الخطوط الزرقاء) + ضغطة مطوّلة على الخريطة لفتح Street View هناك */
   var svCov=L.tileLayer('https://mts1.googleapis.com/vt?hl=fr&lyrs=svv|cb_client:apiv3&style=40,18&x={x}&y={y}&z={z}',{maxZoom:21,opacity:.85,zIndex:450}), svCovOn=true; svCov.addTo(map);
@@ -4158,6 +4168,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function onPos(p){
     var lat=p.coords.latitude, lon=p.coords.longitude, acc=p.coords.accuracy||0;
     meLast={lat:lat,lon:lon};
+    try{ svFollow(lat,lon); }catch(e){}
     meAcc=acc; var html=meHtml();
     if(!meMarker){
       meMarker=L.marker([lat,lon],{
