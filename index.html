@@ -4202,7 +4202,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     else { start(); say('📡 جارٍ تحديد موقعك…',3000); }
   };
   /* ===== 🆘 secousse violente du téléphone = SOS : cercle rouge + HELP qui se propage, diffusé à tous (ala_store) ===== */
-  var SOS_MS=60000, SHK_G=25, sosUntil=0, sosIv=null, shkN=0, shkT0=0, shkPk=0, sosOthers={}, sosLayer=L.layerGroup().addTo(map), shkDev=null, shkPerm=false;
+  var SOS_MS=60000, SHK_G=10, sosUntil=0, sosIv=null, shkN=0, shkT0=0, shkPk=0, sosOthers={}, sosLayer=L.layerGroup().addTo(map), shkDev=null, shkPerm=false;
   var SOS_HTML='<div class="rc r sos">HELP<i class="hp">HELP</i><i class="hp" style="animation-delay:.8s">HELP</i><i class="hp" style="animation-delay:1.6s">HELP</i></div>';
   function sosIcon(){ return L.divIcon({className:'',html:SOS_HTML,iconSize:[38,38],iconAnchor:[19,19]}); }
   function meIcon(){ return L.divIcon({className:'',html:'<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><div class="me-dot"></div></div>',iconSize:[44,44],iconAnchor:[22,22]}); }
