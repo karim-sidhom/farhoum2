@@ -4220,6 +4220,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     try{ if(navigator.vibrate) navigator.vibrate([200,100,200,100,400]); }catch(e){}
     say('🆘 HELP — تم إرسال الاستغاثة / Alerte envoyée',6000);
     sosShowCall(true);
+    try{ location.href='tel:'+SOS_TEL; }catch(e){}
     clearInterval(sosIv);
     sosIv=setInterval(function(){ if(Date.now()>=sosUntil) sosStop(); else sosPush(true); },5000);
   }
