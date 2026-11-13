@@ -3644,6 +3644,7 @@ if('serviceWorker' in navigator){
   var meMarker=null, meCircle=null, meLast=null, watchId=null, firstFix=true, toastTm=null;
   var toast=document.getElementById('meToast');
   function say(t,ms){
+    if(AR){ try{ t=toAr(t); }catch(e){} }
     toast.textContent=t; toast.style.display='block';
     try{ var sv=document.getElementById('svTxt'); if(sv&&svBox&&svBox.style.display==='block') sv.textContent=t; }catch(e){}
     clearTimeout(toastTm); toastTm=setTimeout(function(){ toast.style.display='none'; },ms||5000);
@@ -3654,8 +3655,170 @@ if('serviceWorker' in navigator){
 
   /* ===== لمس موقعك: اهتزاز + صوت « Tu es ici » — ولمس مكان آخر: توجيه صوتي نحو موقعك ===== */
   var ME_SAY_TEXT='Tu es ici', ME_SAY_LANG='fr-FR', ME_TOUCH_PX=34, ME_NEAR_PX=100, lastSay=0, lastDir=0, guideOn=true;
+
+  /* ===== 🌐 Mode arabe : voix (ar-SA), messages et descriptions en arabe ===== */
+  var AR=false; try{ AR=localStorage.getItem('lang_ar')==='1'; }catch(e){}
+  if(AR) ME_SAY_LANG='ar-SA';
+  var AR_DIR={'nord-est':'الشمال الشرقي','nord-ouest':'الشمال الغربي','sud-est':'الجنوب الشرقي','sud-ouest':'الجنوب الغربي','nord':'الشمال','sud':'الجنوب','est':'الشرق','ouest':'الغرب'};
+  var AR_DRE='(nord-est|nord-ouest|sud-est|sud-ouest|nord|sud|est|ouest)';
+  var AR_NOUNS=[['distributeurs de billets','distributeur de billets','موزعات آلية','موزع آلي'],['cabinets médicaux','cabinet médical','عيادات طبية','عيادة طبية'],['bureaux de poste','bureau de poste','مكاتب بريد','مكتب بريد'],['postes de police','poste de police','مراكز شرطة','مركز شرطة'],['stations-service','station-service','محطات وقود','محطة وقود'],['supermarchés','supermarché','أسواق ممتازة','سوبرماركت'],['boulangeries','boulangerie','مخابز','مخبزة'],['pharmacies','pharmacie','صيدليات','صيدلية'],['mosquées','mosquée','مساجد','مسجد'],['hôpitaux','hôpital','مستشفيات','مستشفى'],['cliniques','clinique','مصحات','مصحة'],['dentistes','dentiste','أطباء أسنان','طبيب أسنان'],['banques','banque','بنوك','بنك'],['écoles','école','مدارس','مدرسة'],['cafés','café','مقاهي','مقهى'],['restaurants','restaurant','مطاعم','مطعم'],['vétérinaires','vétérinaire','بياطرة','بيطري'],['opticiens','opticien','نظّاراتيون','نظّاراتي'],['hôtels','hôtel','فنادق','فندق'],['coiffeurs','coiffeur','حلاقون','حلاق'],['boucheries','boucherie','جزارات','جزارة']];
+  var AR_LAND=[['quartier résidentiel','حي سكني'],['zone commerciale','منطقة تجارية'],['zone industrielle','منطقة صناعية'],['terres agricoles','أراضٍ زراعية'],['vergers','بساتين'],['vignes','كروم'],['forêt','غابة'],['zone boisée','منطقة مشجرة'],['prairie','مرج'],['sable','رمال'],['désert','صحراء'],['broussailles','شجيرات'],['terrain rocheux','أرض صخرية'],['zone humide','منطقة رطبة'],['carrière','محجر'],['marais salants','سبخات ملحية'],['cimetière','مقبرة'],['zone militaire','منطقة عسكرية'],['chantier','ورشة بناء'],['espace vert','مساحة خضراء'],['zone de loisirs','منطقة ترفيه'],['lande','أرض عشبية'],['éboulis','أنقاض صخرية']];
+  var AR_TYPES=[['une très grande ville','مدينة كبيرة جداً'],['une grande ville','مدينة كبيرة'],['une ville moyenne','مدينة متوسطة'],['une petite ville','مدينة صغيرة'],['un petit village','قرية صغيرة'],['un village','قرية'],['un bourg','بلدة'],['un hameau','قرية صغيرة'],['une ville','مدينة'],['une localité','منطقة سكنية']];
+  var AR_RULES=null;
+  function arBuild(){
+    var A="[\u2019']", R=[];
+    function P(re,to){ R.push([re,to]); }
+    function D(pre,post){ return new RegExp(pre+'(?:au |à l'+A+')'+AR_DRE+post,'g'); }
+    /* tour du quartier */
+    P(/Tour du quartier\. Je prépare le parcours\./g,'جولة في الحي. أحضّر المسار.');
+    P(new RegExp('Parcours d'+A+'environ ([^,]+), (\\d+) étapes, une toutes les vingt secondes\\.','g'),'مسار طوله حوالي $1، $2 محطة، محطة كل عشرين ثانية.');
+    P(/Pas de boucle possible ici : retour par la même rue à la fin\./g,'لا توجد حلقة ممكنة هنا: العودة من نفس الشارع في النهاية.');
+    P(/Parcours approximatif\./g,'مسار تقريبي.');
+    P(/Le tour passe par : /g,'تمر الجولة عبر: ');
+    P(new RegExp('Dans ce quartier, j'+A+'ai trouvé : ','g'),'في هذا الحي وجدت: ');
+    P(/Tour du quartier terminé\. Retour à ton point de départ\./g,'انتهت جولة الحي. العودة إلى نقطة انطلاقك.');
+    P(/Impossible de préparer le tour du quartier\. Réessaie dans un instant\./g,'تعذر تحضير جولة الحي. أعد المحاولة بعد قليل.');
+    P(/Étape finale, retour à ton point de départ\./g,'المحطة الأخيرة، العودة إلى نقطة انطلاقك.');
+    P(/Retour à ton point de départ\./g,'العودة إلى نقطة انطلاقك.');
+    P(/Rue sans nom connue/g,'شارع بلا اسم معروف');
+    P(/Étape (\d+) sur (\d+)/g,'المحطة $1 من $2');
+    P(new RegExp('Je ne la situe pas, son nom n'+A+'est pas connu\\.','g'),'لا أستطيع تحديد موقعه، اسمه غير معروف.');
+    P(/Cette rue est tout près de toi\./g,'هذا الشارع قريب جداً منك.');
+    P(/Cet endroit est tout près de toi\./g,'هذا المكان قريب جداً منك.');
+    P(new RegExp('Cette rue se situe (?:au |à l'+A+')'+AR_DRE+' de toi\\.','g'),function(m,d){ return 'هذا الشارع يقع في '+AR_DIR[d]+' منك.'; });
+    P(new RegExp('Cet endroit se situe (?:au |à l'+A+')'+AR_DRE+' de toi\\.','g'),function(m,d){ return 'هذا المكان يقع في '+AR_DIR[d]+' منك.'; });
+    P(/\(estimation\)/g,'(تقدير)');
+    P(/En voiture, /g,'بالسيارة، ');
+    P(/À pied, /g,'سيراً على الأقدام، ');
+    P(/Pour y aller à pied : /g,'للوصول سيراً على الأقدام: ');
+    P(/Pour y aller : va tout droit, /g,'للوصول: امشِ مباشرة، ');
+    P(new RegExp('pars vers (?:le |l'+A+')'+AR_DRE,'g'),function(m,d){ return 'انطلق نحو '+AR_DIR[d]; });
+    P(/tourne légèrement à gauche/g,'انعطف قليلاً إلى اليسار');
+    P(/tourne légèrement à droite/g,'انعطف قليلاً إلى اليمين');
+    P(/tourne franchement à gauche/g,'انعطف بحدة إلى اليسار');
+    P(/tourne franchement à droite/g,'انعطف بحدة إلى اليمين');
+    P(/tourne à gauche/g,'انعطف يساراً');
+    P(/tourne à droite/g,'انعطف يميناً');
+    P(/fais demi-tour/g,'استدر عائداً');
+    P(/(يساراً|يميناً|اليسار|اليمين) sur /g,'$1 في ');
+    P(/au rond-point, prends la (\d+)(?:re|e) sortie/g,'عند الدوار، خذ المخرج رقم $1');
+    P(/à la bifurcation, /g,'عند التفرع، ');
+    P(/, tu es arrivé/g,'، لقد وصلت');
+    P(new RegExp(', puis suis l'+A+'itinéraire jusqu'+A+'à la rue\\.','g'),'، ثم تابع المسار حتى الشارع.');
+    P(/, puis /g,'، ثم ');
+    /* services */
+    P(/À proximité : /g,'بالقرب منك: ');
+    P(/Dans ce quartier/g,'في هذا الحي');
+    /* guidage, lieux, trains */
+    P(/Tu es ici/g,'أنت هنا');
+    P(/Position pas encore trouvée/g,'لم يتم تحديد موقعك بعد');
+    P(new RegExp('Ta position n'+A+'est pas encore trouvée\\.','g'),'لم يتم تحديد موقعك بعد.');
+    P(/Description du lieu\./g,'وصف المكان.');
+    P(/Street View\. Je regarde le lieu\./g,'ستريت فيو. أنظر إلى المكان.');
+    P(new RegExp('Ta position est hors de l'+A+'écran\\.','g'),'موقعك خارج الشاشة.');
+    P(/(un peu )?plus (en haut|en bas|à gauche|à droite)/gi,function(m,a,d){ var M={'en haut':'الأعلى','en bas':'الأسفل','à gauche':'اليسار','à droite':'اليمين'}; return (a?'قليلاً ':'')+'أكثر إلى '+M[d.toLowerCase()]; });
+    P(/(الأعلى|الأسفل|اليسار|اليمين) et /g,'$1 و');
+    P(/Tout près de toi, à /g,'قريب جداً منك، على بعد ');
+    P(/Tout près de toi/g,'قريب جداً منك');
+    P(/Par la route, /g,'عبر الطريق، ');
+    P(/Train /g,'قطار ');
+    P(/En retard de (\d+) minutes?/g,'متأخر $1 دقيقة');
+    P(new RegExp('À l'+A+'heure','g'),'في الموعد');
+    P(/Position : /g,'الموقع: ');
+    /* description du lieu */
+    P(new RegExp('(Tu es|Cet endroit est) dans une région montagneuse, avec un dénivelé d'+A+'environ ([\\d  ]+) mètres (?:autour de toi|autour de cet endroit)\\.','g'),function(m,w,n){ return (w==='Tu es'?'أنت':'هذا المكان')+' في منطقة جبلية بفارق ارتفاع حوالي '+n+' متر حولك.'; });
+    P(new RegExp('(Tu es|Cet endroit est) dans ([^,]+), en dehors de toute localité connue\\.','g'),function(m,w,n){ return (w==='Tu es'?'أنت':'هذا المكان')+' في '+n+'، خارج أي منطقة سكنية معروفة.'; });
+    P(new RegExp('(Tu es|Cet endroit est) près de ','g'),function(m,w){ return (w==='Tu es'?'أنت':'هذا المكان')+' قرب '; });
+    P(/(Tu es|Cet endroit est) au bord de la mer\./g,function(m,w){ return (w==='Tu es'?'أنت':'هذا المكان')+' على شاطئ البحر.'; });
+    P(/(Tu es|Cet endroit est) à /g,function(m,w){ return (w==='Tu es'?'أنت':'هذا المكان')+' في '; });
+    AR_LAND.forEach(function(x){ P(new RegExp(x[0],'g'),x[1]); });
+    P(/, quartier /g,'، حي ');
+    AR_TYPES.forEach(function(x){ P(new RegExp(x[0],'g'),x[1]); });
+    P(new RegExp('C'+A+'est (مدينة|قرية|بلدة|منطقة)','g'),'إنها $1');
+    P(new RegExp('d'+A+'environ ([\\d  ]+) habitants','g'),'يبلغ عدد سكانها حوالي $1 نسمة');
+    P(new RegExp('dont la population n'+A+'est pas indiquée','g'),'لم يُذكر عدد سكانها');
+    P(/La localité la plus proche, ([^,]*), /g,'أقرب منطقة سكنية، $1، ');
+    P(/, est (مدينة|قرية|بلدة|منطقة)/g,'، هي $1');
+    P(/Aucun bâtiment à moins de 250 mètres : zone ouverte\./g,'لا توجد مبانٍ على بعد أقل من 250 متراً: منطقة مفتوحة.');
+    P(/Quelques bâtiments isolés/g,'بضعة مبانٍ معزولة');
+    P(/Zone peu bâtie, habitat dispersé\./g,'منطقة قليلة البناء، سكن متفرق.');
+    P(/Zone bâtie, de densité moyenne\./g,'منطقة مبنية بكثافة متوسطة.');
+    P(/Zone urbaine dense\./g,'منطقة حضرية كثيفة.');
+    P(/autour de toi/gi,function(m){ return m.charAt(0)==='A'?'من حولك':'حولك'; });
+    P(/autour de cet endroit/gi,function(m){ return m.charAt(0)==='A'?'حول هذا المكان':'حول هذا المكان'; });
+    P(/Autour de /g,'حول ');
+    P(/Pas de mer à moins de 25 kilomètres\./g,'لا يوجد بحر على بعد أقل من 25 كيلومتراً.');
+    P(/La mer est tout près/g,'البحر قريب جداً');
+    P(/La mer est /g,'البحر ');
+    P(/Altitude : (\d+) mètres\. /g,'الارتفاع: $1 متراً. ');
+    P(/Le terrain est plat\./g,'الأرض مستوية.');
+    P(/Le terrain est légèrement vallonné\./g,'الأرض متموجة قليلاً.');
+    P(/Le relief est vallonné\./g,'التضاريس متموجة.');
+    P(/Le relief est accidenté, avec des collines ou des montagnes aux alentours\./g,'التضاريس وعرة، مع تلال أو جبال في المحيط.');
+    P(/Tu te trouves sur une hauteur\./g,'أنت على مرتفع.');
+    P(/Tu te trouves dans une vallée ou une cuvette\./g,'أنت في وادٍ أو منخفض.');
+    P(/Le sommet /g,'القمة ');
+    P(/Un sommet de (\d+) mètres est à /g,'قمة ارتفاعها $1 متراً تبعد ');
+    P(/, est à /g,'، تبعد ');
+    P(/Adresse : /g,'العنوان: ');
+    P(/À propos de la délégation de /g,'نبذة عن معتمدية ');
+    P(/À propos de /g,'نبذة عن ');
+    P(/municipalité de /g,'بلدية ');
+    P(/délégation de /g,'معتمدية ');
+    P(/gouvernorat de /g,'ولاية ');
+    P(/code postal /g,'الرمز البريدي ');
+    P(/Tunisie/g,'تونس');
+    P(/Depuis ta position : /g,'من موقعك: ');
+    P(new RegExp('à vol d'+A+'oiseau ','g'),'بخط مستقيم ');
+    P(new RegExp('À vol d'+A+'oiseau, ','g'),'بخط مستقيم، ');
+    P(/, par la route /g,'، عبر الطريق ');
+    P(/, itinéraire par la route indisponible/g,'، الطريق بالسيارة غير متاح');
+    P(new RegExp(' Je n'+A+'ai pas pu charger : ','g'),' لم أتمكن من تحميل: ');
+    P(/Impossible de décrire le lieu\. Vérifie ta connexion Internet\./g,'تعذر وصف المكان. تحقق من اتصالك بالإنترنت.');
+    P(/Impossible de décrire le lieu\./g,'تعذر وصف المكان.');
+    P(new RegExp('Je n'+A+'ai pas pu décrire ce lieu\\.','g'),'لم أتمكن من وصف هذا المكان.');
+    /* messages affichés */
+    P(/Préparation du tour du quartier…/g,'تحضير جولة الحي…');
+    P(/Tour du quartier arrêté/g,'تم إيقاف جولة الحي');
+    P(/Tour terminé — retour à ta position/g,'انتهت الجولة — العودة إلى موقعك');
+    P(/Tour du quartier impossible/g,'جولة الحي غير ممكنة');
+    P(/Analyse du lieu… \(quelques secondes\)/g,'تحليل المكان… (بضع ثوانٍ)');
+    P(/Analyse du lieu…/g,'تحليل المكان…');
+    P(/Analyse en cours, un instant…/g,'التحليل جارٍ، لحظة…');
+    P(/Guidage vocal activé/g,'التوجيه الصوتي مفعّل');
+    P(/Guidage vocal désactivé/g,'التوجيه الصوتي متوقف');
+    P(/Alerte envoyée/g,'تم إرسال التنبيه');
+    /* directions génériques */
+    P(D('','' ),function(m,d){ return 'في '+AR_DIR[d]; });
+    P(new RegExp('vers (?:le |l'+A+')'+AR_DRE,'g'),function(m,d){ return 'نحو '+AR_DIR[d]; });
+    P(/\ben haut\b/g,'في الأعلى'); P(/\ben bas\b/g,'في الأسفل'); P(/à gauche/g,'إلى اليسار'); P(/à droite/g,'إلى اليمين');
+    P(/de cet endroit/g,'من هذا المكان'); P(/\bde toi\b/g,'منك');
+    P(/ vers /g,' نحو ');
+    P(/(^|[ ,(])à (?=\d)/g,'$1على بعد ');
+    /* noms de lieux / services */
+    AR_NOUNS.forEach(function(n){
+      P(new RegExp('(\\d+) (?:'+n[0]+'|'+n[1]+')','gi'),function(m,c){ return c+' '+(+c>1?n[2]:n[3]); });
+    });
+    AR_NOUNS.forEach(function(n){ P(new RegExp(n[0],'gi'),n[2]); P(new RegExp(n[1],'gi'),n[3]); });
+    P(/(^|\. )Lieu(?= )/g,'$1مكان');
+    /* unités */
+    P(/(\d+(?:,\d+)?) kilomètres?/g,'$1 كيلومتر');
+    P(/(\d+) mètres?/g,'$1 متر');
+    P(/(\d+) minutes?/g,function(m,n){ n=+n; return n===1?'دقيقة':(n===2?'دقيقتان':(n<=10?n+' دقائق':n+' دقيقة')); });
+    P(/ en voiture/g,' بالسيارة');
+    P(/\benviron\b/g,'حوالي');
+    P(/, /g,'، ');
+    return R;
+  }
+  function toAr(t){
+    try{
+      if(!AR_RULES) AR_RULES=arBuild();
+      var o=String(t); for(var i=0;i<AR_RULES.length;i++) o=o.replace(AR_RULES[i][0],AR_RULES[i][1]);
+      return o;
+    }catch(e){ try{ console.warn('toAr',e); }catch(x){} return t; }
+  }
   function speak(t){
-    speechEpoch++;
+    speechEpoch++; if(AR){ try{ t=toAr(t); }catch(e){} }
     try{
       if(window.speechSynthesis){
         window.speechSynthesis.cancel();
@@ -3926,7 +4089,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
 /*PURE_END*/
 
   /* ===== وصف شامل للمكان: المدينة وعدد السكان، البحر، الجبال، الارتفاع، كثافة البناء ===== */
-  var speechEpoch=0, descBusy=false, descForce=false, descCache={}, DESC_TTL=15*60000, meDescTxt='';
+  var speechEpoch=0, descBusy=false, descForce=false, descCache={}, DESC_TTL=15*60000, meDescTxt='', cityDone='';
   function jget(url,ms){
     var ctl=new AbortController(), tm=setTimeout(function(){ ctl.abort(); },ms||12000);
     return fetch(url,{signal:ctl.signal}).then(function(r){ clearTimeout(tm); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); },function(e){ clearTimeout(tm); throw e; });
@@ -3977,6 +4140,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function speakAdd(t){
     try{
       if(!window.speechSynthesis) return;
+      if(AR) t=toAr(t);
       (String(t).match(/[^.!?]+[.!?]*/g)||[]).forEach(function(sn){
         if(!sn.trim()) return;
         var u=new SpeechSynthesisUtterance(sn.trim()); u.lang=ME_SAY_LANG; u.rate=0.95; u.volume=1;
@@ -3993,9 +4157,9 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function errMsg(r){ var e=r&&r.reason; return (e&&(e.name==='AbortError'?'délai dépassé':e.message))||'échec'; }
   var descRemote=false, descSeq=0, descKey='';
   function wikiArea(q){
-    return jget('https://fr.wikipedia.org/w/api.php?action=query&list=search&srsearch='+encodeURIComponent(q)+'&srlimit=1&format=json&origin=*',9000).then(function(j){
+    return jget('https://'+(AR?'ar':'fr')+'.wikipedia.org/w/api.php?action=query&list=search&srsearch='+encodeURIComponent(q)+'&srlimit=1&format=json&origin=*',9000).then(function(j){
       var r=j&&j.query&&j.query.search&&j.query.search[0]; if(!r) return null;
-      return jget('https://fr.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(r.title.replace(/ /g,'_')),9000).then(function(sm){
+      return jget('https://'+(AR?'ar':'fr')+'.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(r.title.replace(/ /g,'_')),9000).then(function(sm){
         if(!sm||sm.type==='disambiguation') return null;
         var ex=String(sm.extract||''), sn=(ex.match(/[^.!?]+[.!?]+(\s|$)/g)||[ex]).slice(0,3).join(' ').trim();
         if(sn.length>450) sn=sn.slice(0,450).replace(/\s\S*$/,'')+'.';
@@ -4004,34 +4168,34 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     });
   }
   function wikiNear(lat,lon){
-    return jget('https://fr.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord='+lat+'%7C'+lon+'&gsradius=2000&gslimit=5&format=json&origin=*',9000).then(function(j){
+    return jget('https://'+(AR?'ar':'fr')+'.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord='+lat+'%7C'+lon+'&gsradius=2000&gslimit=5&format=json&origin=*',9000).then(function(j){
       var r=(j&&j.query&&j.query.geosearch)||[]; if(!r.length) return null;
       var p=r[0];
-      return jget('https://fr.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(p.title.replace(/ /g,'_')),9000).then(function(sm){
+      return jget('https://'+(AR?'ar':'fr')+'.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(p.title.replace(/ /g,'_')),9000).then(function(sm){
         var ex=String((sm&&sm.extract)||''), sn=(ex.match(/[^.!?]+[.!?]+(\s|$)/g)||[ex]).slice(0,2).join(' ').trim();
         if(sn.length>380) sn=sn.slice(0,380).replace(/\s\S*$/,'')+'.';
         return {title:p.title,dist:p.dist,text:sn};
       });
     });
   }
-  async function describeHere(force,pos){
+  async function describeHere(force,pos,quiet,tour){
     descRemote=!!pos; var P=pos||meLast;
     if(!P){ if(force){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); } return; }
     if(!force&&!guideOn) return;
-    var lat=P.lat, lon=P.lon, key=(pos?'r:':'')+lat.toFixed(3)+','+lon.toFixed(3), hit=descCache[key];
-    if(hit&&Date.now()-hit.t<DESC_TTL){ descSeq++; descBusy=false; showDesc(hit.txt,''); return; }
+    var lat=P.lat, lon=P.lon, key=(AR?'a:':'f:')+(pos?'r:':'')+lat.toFixed(3)+','+lon.toFixed(3), hit=descCache[key];
+    if(hit&&Date.now()-hit.t<DESC_TTL){ descSeq++; descBusy=false; var sameH=quiet&&hit.city&&hit.city===cityDone, tx=sameH&&hit.short?hit.short:hit.txt; if(quiet&&hit.city) cityDone=hit.city; if(tour&&tour.pre){ try{ var pr0=await tour.pre; if(pr0) tx=pr0+' '+tx; }catch(e){} } showDesc(tx,''); return; }
     if(descBusy&&descKey===key){ if(force) say('🌍 Analyse en cours, un instant…',4000); return; }
     var mySeq=++descSeq; descBusy=true; descKey=key;
     say('🌍 Analyse du lieu… (quelques secondes)',20000);
     try{
       var pts=dRing(lat,lon);
       var rs=await Promise.allSettled([
-        jget('https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&accept-language=fr&lat='+lat+'&lon='+lon,12000),
+        jget('https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&accept-language='+(AR?'ar':'fr')+'&lat='+lat+'&lon='+lon,12000),
         ovp(ovpQueryLocal(lat,lon)),
         ovp(ovpQueryCoast(lat,lon)),
         wikiNear(lat,lon),
         jget('https://api.open-meteo.com/v1/elevation?latitude='+pts.map(function(p){ return p[0].toFixed(5); }).join(',')+'&longitude='+pts.map(function(p){ return p[1].toFixed(5); }).join(','),12000),
-        (pos&&meLast)?jget('https://router.project-osrm.org/route/v1/driving/'+meLast.lon+','+meLast.lat+';'+lon+','+lat+'?overview=false',10000):Promise.resolve(null),
+        (pos&&meLast&&!tour)?jget('https://router.project-osrm.org/route/v1/driving/'+meLast.lon+','+meLast.lat+';'+lon+','+lat+'?overview=false',10000):Promise.resolve(null),
         ovp('[out:json][timeout:12];is_in('+lat+','+lon+')->.a;area.a["boundary"="administrative"]["admin_level"~"^[4-9]$"];out tags;')
       ]);
       if(mySeq!==descSeq) return;
@@ -4061,13 +4225,13 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       var adm={};
       if(rs[6].status==='fulfilled'&&rs[6].value&&rs[6].value.elements){
         rs[6].value.elements.forEach(function(e){
-          var t=e.tags||{}, lv=parseInt(t.admin_level,10), nm=t['name:fr']||t['alt_name:fr']||t.name||'';
+          var t=e.tags||{}, lv=parseInt(t.admin_level,10), nm=(AR?t['name:ar']:t['name:fr'])||t['alt_name:fr']||t.name||'';
           if(!nm||!isFinite(lv)) return;
           if(lv===4) adm.gov=nm; else if(lv===5) adm.deleg=nm; else if(lv>=6&&(!adm.muniLv||lv>adm.muniLv)){ adm.muni=nm; adm.muniLv=lv; }
         });
       }
       var distS='';
-      if(pos&&meLast){
+      if(pos&&meLast&&!tour){
         var dyM=(lat-meLast.lat)*111320, dxM=(lon-meLast.lon)*111320*Math.cos(meLast.lat*Math.PI/180), bird=Math.sqrt(dxM*dxM+dyM*dyM);
         distS='Depuis ta position : à vol d\u2019oiseau '+fmtM(bird);
         var rt=rs[5].status==='fulfilled'&&rs[5].value&&rs[5].value.routes&&rs[5].value.routes[0];
@@ -4083,35 +4247,44 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       if(adm.muni) muni=String(adm.muni).replace(/^(municipalité|commune)\s*(de |d\u2019|d'|du |des )?/i,'').trim();
       if(!gov||!muni){
         try{
-          var bd=await jget('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude='+lat+'&longitude='+lon+'&localityLanguage=fr',8000);
+          var bd=await jget('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude='+lat+'&longitude='+lon+'&localityLanguage='+(AR?'ar':'fr'),8000);
           if(mySeq!==descSeq) return;
           if(!gov&&bd&&bd.principalSubdivision) gov=String(bd.principalSubdivision).replace(/^gouvernorat\s*(de |d\u2019|d'|du |des )?/i,'').trim();
           if(!muni&&bd&&(bd.city||bd.locality)) muni=bd.city||bd.locality;
         }catch(e){}
       }
-      var ad=[];
-      if(road) ad.push((A.house_number?A.house_number+', ':'')+road);
-      if(hood&&hood!==muni) ad.push('quartier '+hood);
+      if(AR){ gov=String(gov||'').replace(/^(ولاية|محافظة)\s*/,''); muni=String(muni||'').replace(/^(بلدية|معتمدية)\s*/,''); deleg=String(deleg||'').replace(/^معتمدية\s*/,''); }
+      var adS=[], ad=[];
+      if(road){ var rd=(A.house_number?A.house_number+', ':'')+road; ad.push(rd); adS.push(rd); }
+      if(hood&&hood!==muni){ ad.push('quartier '+hood); adS.push('quartier '+hood); }
       if(muni) ad.push('municipalité de '+muni);
       if(deleg&&deleg!==muni&&deleg!==gov) ad.push('délégation de '+String(deleg).replace(/^délégation\s*(de |d\u2019|d'|du |des )?/i,''));
       if(gov) ad.push('gouvernorat de '+gov);
       if(A.postcode) ad.push('code postal '+String(A.postcode).split('').join(' '));
       if(A.country) ad.push(A.country);
-      var wikiS='', dg=String(deleg||'').replace(/^délégation\s*(de |d\u2019|d'|du |des )?/i,''), ctry=A.country||'Tunisie';
+      var wCity='', wNear='', dg=String(deleg||'').replace(/^délégation\s*(de |d\u2019|d'|du |des )?/i,''), ctry=A.country||'Tunisie';
       var useDg=deleg&&deleg!==muni&&deleg!==gov;
       try{
         var wr=await Promise.allSettled([muni?wikiArea(muni+' '+ctry):null, useDg?wikiArea('délégation '+dg+' '+ctry):null]);
         if(mySeq!==descSeq) return;
-        if(wr[0].status==='fulfilled'&&wr[0].value) wikiS+='À propos de '+muni+' : '+wr[0].value+' ';
-        if(wr[1].status==='fulfilled'&&wr[1].value) wikiS+='À propos de la délégation de '+dg+' : '+wr[1].value+' ';
+        if(wr[0].status==='fulfilled'&&wr[0].value) wCity+='À propos de '+muni+' : '+wr[0].value+' ';
+        if(wr[1].status==='fulfilled'&&wr[1].value) wCity+='À propos de la délégation de '+dg+' : '+wr[1].value+' ';
       }catch(e){}
-      if(wk&&wk.text) wikiS+='À proximité : '+wk.title+(isFinite(wk.dist)?', à '+fmtM(wk.dist):'')+'. '+wk.text+' ';
-      if(ad.length){
-        if(muni) txt=txt.replace(/^(Tu es|Cet endroit est) à [^.]*\.\s*/,'');
-        txt='Adresse : '+ad.join(', ')+'. '+distS+wikiS+txt;
-      } else txt=distS+wikiS+txt;
-      if(!txt) txt='Je n\u2019ai pas pu décrire ce lieu.';
-      else if(!fails.length&&!pos) descCache[key]={t:Date.now(),txt:txt};
+      if(wk&&wk.text) wNear+='À proximité : '+wk.title+(isFinite(wk.dist)?', à '+fmtM(wk.dist):'')+'. '+wk.text+' ';
+      /* version complète (avec la ville) et version courte (sans répéter la ville déjà annoncée) */
+      var baseS=txt.replace(/^(Tu es|Cet endroit est) (à|près de|dans) [^.]*\.\s*/,'').replace(/C\u2019est (?:une?|un) [^.]*?(?:habitants|indiquée)\.\s*/,'');
+      function asm(adl,w,b,cut){
+        var t=b;
+        if(adl.length){ if(muni&&cut) t=t.replace(/^(Tu es|Cet endroit est) à [^.]*\.\s*/,''); return 'Adresse : '+adl.join(', ')+'. '+distS+w+t; }
+        return distS+w+t;
+      }
+      var fullT=asm(ad,wCity+wNear,txt,true), shortT=asm(adS,wNear,baseS,false);
+      var cityK=dNorm(muni||''), sameC=!!(quiet&&cityK&&cityK===cityDone);
+      txt=sameC?shortT:fullT;
+      if(!txt.trim()) txt='Je n\u2019ai pas pu décrire ce lieu.';
+      else if(!fails.length&&!pos) descCache[key]={t:Date.now(),txt:fullT,short:shortT,city:cityK};
+      if(quiet&&cityK) cityDone=cityK;
+      if(tour&&tour.pre){ try{ var pr1=await tour.pre; if(pr1) txt=pr1+' '+txt; }catch(e){} }
       showDesc(txt,fails.join(', '));
     }catch(e){
       try{ console.warn('describe',e); }catch(x){}
@@ -4131,32 +4304,365 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     svBox.innerHTML='<div id="svTxt" style="position:absolute;left:0;right:0;top:0;max-height:38%;overflow:auto;z-index:2;background:#0d1a6eE6;color:#fff;font:15px/1.4 system-ui,sans-serif;padding:8px 12px;direction:ltr;white-space:pre-wrap"></div>'+
       '<iframe id="svFrame" style="position:absolute;inset:0 0 46px 0;width:100%;height:calc(100% - 46px);border:0" allowfullscreen loading="lazy"></iframe>'+
       '<div style="position:absolute;left:0;right:0;bottom:0;height:46px;background:#0d1a6e;display:flex;gap:8px;align-items:center;justify-content:center">'+
+      '<button id="svSos" style="background:#e02424;color:#fff;border:1px solid #fff;border-radius:8px;padding:8px 14px;font-weight:900">🆘 HELP</button>'+
       '<button id="svClose" style="background:transparent;color:#fff;border:1px solid #d4af37;border-radius:8px;padding:8px 14px">✕</button></div>';
     document.body.appendChild(svBox);
+    document.getElementById('svSos').onclick=function(){ var b=document.getElementById('sosBtn'); if(b) b.click(); };
     document.getElementById('svClose').onclick=function(){ svBox.style.display='none'; document.getElementById('svFrame').src='about:blank'; try{ speechSynthesis.cancel(); }catch(e){} };
         return svBox;
   }
-  var svPos=null;
-  function svOpen(lat,lon){
+  var svPos=null, svUserPick=false, svFT=0, svPend=null;
+  function svOpen(lat,lon,tour,pre){
     var own=typeof lat!=='number';
+    if(!own) svUserPick=true;
+    svFT=Date.now(); svPend=null;
     if(own){ if(!meLast){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); return; } lat=meLast.lat; lon=meLast.lon; }
     svPos=own?null:{lat:lat,lon:lon};
     svLast=own?{lat:lat,lon:lon}:null;
     svUi().style.display='block';
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
-    speak('Street View. Je regarde le lieu.');
-    describeHere(true,svPos);
+    speak(tour?tour:'Street View. Je regarde le lieu.');
+    describeHere(true,svPos,true,tour?{pre:pre}:false);
   }
   var svLast=null;
-  function svFollow(lat,lon){
-    if(!svBox||svBox.style.display==='none'||svPos) return;
-    if(svLast&&map.distance([svLast.lat,svLast.lon],[lat,lon])<15) return;
-    svLast={lat:lat,lon:lon};
-    document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
-    document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
-    describeHere(true,null);
+  /* suivi : on se met à jour au plus toutes les 20 s, et seulement quand la lecture vocale précédente est finie */
+  function svFollow(lat,lon){ svPend={lat:lat,lon:lon}; svTick(); }
+  function svTick(){
+    if(!svPend||!svBox||svBox.style.display==='none'||svPos) return;
+    var now=Date.now(); if(now-svFT<20000) return;
+    try{ if(window.speechSynthesis&&(speechSynthesis.speaking||speechSynthesis.pending)) return; }catch(e){}
+    if(svLast&&map.distance([svLast.lat,svLast.lon],[svPend.lat,svPend.lon])<15) return;
+    var p=svPend; svPend=null; svFT=now; svLast={lat:p.lat,lon:p.lon};
+    document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+p.lat+','+p.lon+'&cbp=12,0,0,0,0&output=svembed';
+    document.getElementById('svTxt').textContent='[v7] 📍 '+p.lat.toFixed(4)+', '+p.lon.toFixed(4)+' — 🌍 Analyse du lieu…';
+    describeHere(true,null,true);
   }
+  setInterval(svTick,2000);
+
+  /* ===== 🏘️ Tour du quartier : un curseur part de ma position GPS, fait une boucle rue par rue,
+     s'arrête toutes les 20 s (au moins), ouvre Street View à cet endroit et lit la description, jusqu'au retour au départ ===== */
+  var TOUR_MS=20000, TOUR_R=300, tour=null, tourIv=null;
+  function tourBear(la,lo,b,m){ var r=Math.PI/180, la1=la*r, lo1=lo*r, br=b*r, d=m/6371000;
+    var la2=Math.asin(Math.sin(la1)*Math.cos(d)+Math.cos(la1)*Math.sin(d)*Math.cos(br));
+    var lo2=lo1+Math.atan2(Math.sin(br)*Math.sin(d)*Math.cos(la1),Math.cos(d)-Math.sin(la1)*Math.sin(la2));
+    return [la2/r,lo2/r]; }
+  /* Boucle sans jamais repasser par la même rue : réseau de rues OSM -> aller (plus court chemin) puis retour
+     par d'autres rues (segments de l'aller interdits, mêmes noms de rues pénalisés) */
+  /* ===== rues du quartier : mémorisées (mémoire + localStorage) et préchargées dès que la position est trouvée ===== */
+  var TOUR_CACHE=null, tourPf=null, tourPfT=Date.now()-55000;
+  function tourCacheLoad(){
+    if(TOUR_CACHE) return TOUR_CACHE;
+    TOUR_CACHE=[]; try{ var r=JSON.parse(localStorage.getItem('tour_net')||'[]'); if(Array.isArray(r)) TOUR_CACHE=r; }catch(e){}
+    return TOUR_CACHE;
+  }
+  function tourCacheSave(){ try{ localStorage.setItem('tour_net',JSON.stringify(TOUR_CACHE.slice(-3))); }catch(e){ try{ TOUR_CACHE=TOUR_CACHE.slice(-1); localStorage.setItem('tour_net',JSON.stringify(TOUR_CACHE)); }catch(x){} } }
+  async function tourWays(la,lo,rad){
+    var C=tourCacheLoad(), now=Date.now();
+    for(var i=C.length-1;i>=0;i--){ var c=C[i]; if(c&&c.w&&c.w.length>3&&now-c.t<7*86400000&&dHav(c.la,c.lo,la,lo)<=120) return c.w.map(function(x){ return {nm:x.n,na:x.a||'',g:x.g.map(function(q){ return {lat:q[0],lon:q[1]}; })}; }); }
+    var q='[out:json][timeout:14];way["highway"~"^(primary|secondary|tertiary|unclassified|residential|living_street|pedestrian|primary_link|secondary_link|tertiary_link)$"](around:'+rad+','+la+','+lo+');out geom;';
+    var jj=await ovp(q), ways=[];
+    ((jj&&jj.elements)||[]).forEach(function(e){
+      if(e.type!=='way'||!e.geometry||e.geometry.length<2) return;
+      var t=e.tags||{}; ways.push({nm:String(t['name:fr']||t.name||t.ref||'').trim(),na:String(t['name:ar']||'').trim(),g:e.geometry.map(function(g){ return {lat:g.lat,lon:g.lon}; })});
+    });
+    if(ways.length>3){
+      C.push({la:la,lo:lo,t:now,w:ways.map(function(x){ return {n:x.nm,a:x.na,g:x.g.map(function(g){ return [+g.lat.toFixed(6),+g.lon.toFixed(6)]; })}; })});
+      tourCacheSave();
+    }
+    return ways;
+  }
+  function tourPrefetch(){
+    if(!meLast) return; var now=Date.now();
+    if(tourPf&&dHav(tourPf.la,tourPf.lo,meLast.lat,meLast.lon)<200) return;
+    if(now-tourPfT<60000) return;
+    tourPfT=now; var me={la:meLast.lat,lo:meLast.lon}; tourPf=me;
+    tourWays(me.la,me.lo,450).catch(function(){ if(tourPf===me) tourPf=null; });
+    setTimeout(function(){ try{ tourPois(me.la,me.lo).catch(function(){}); }catch(e){} },3000);
+  }
+  async function tourRouteOsm(la,lo,rad){
+    var ws=await tourWays(la,lo,rad), N=[], idx={};
+    function nid(g){ var k=g.lat.toFixed(6)+','+g.lon.toFixed(6); if(idx[k]==null){ idx[k]=N.length; N.push({la:g.lat,lo:g.lon,adj:[]}); } return idx[k]; }
+    ws.forEach(function(e){
+      var nm=(AR&&e.na)?e.na:(e.nm||'');
+      for(var i=1;i<e.g.length;i++){
+        var a=nid(e.g[i-1]), b=nid(e.g[i]); if(a===b) continue;
+        var w=dHav(N[a].la,N[a].lo,N[b].la,N[b].lo), id=a<b?a+'|'+b:b+'|'+a;
+        N[a].adj.push({to:b,w:w,nm:nm,id:id}); N[b].adj.push({to:a,w:w,nm:nm,id:id});
+      }
+    });
+    if(N.length<4) throw new Error('pas de rues trouvées ici');
+    var S=-1, sd=1e9; N.forEach(function(n,k){ var d=dHav(la,lo,n.la,n.lo); if(d<sd){ sd=d; S=k; } });
+    if(sd>200) throw new Error('aucune rue à moins de 200 m');
+    function dijk(src,banned,penNm){
+      var n=N.length, cost=new Array(n).fill(Infinity), raw=new Array(n).fill(Infinity), prev=new Array(n).fill(null), done=new Array(n).fill(false);
+      cost[src]=0; raw[src]=0;
+      for(;;){
+        var u=-1, best=Infinity; for(var k=0;k<n;k++) if(!done[k]&&cost[k]<best){ best=cost[k]; u=k; }
+        if(u<0) break; done[u]=true;
+        N[u].adj.forEach(function(ed){
+          if(banned&&banned[ed.id]) return;
+          var c=ed.w*((penNm&&ed.nm&&penNm[dNorm(ed.nm)])?5:1);
+          if(cost[u]+c<cost[ed.to]){ cost[ed.to]=cost[u]+c; raw[ed.to]=raw[u]+ed.w; prev[ed.to]={u:u,ed:ed}; }
+        });
+      }
+      return {cost:cost,raw:raw,prev:prev};
+    }
+    function pathTo(D,src,t){ var eds=[], v=t; while(v!==src){ var pv=D.prev[v]; if(!pv) return null; eds.push({from:pv.u,to:v,ed:pv.ed}); v=pv.u; } return eds.reverse(); }
+    var D0=dijk(S,null,null), buckets={};
+    N.forEach(function(n,k){ var d=D0.raw[k]; if(!isFinite(d)||d<350||d>750) return;
+      var br=Math.floor(((Math.atan2((n.lo-lo)*Math.cos(la*Math.PI/180),n.la-la)*180/Math.PI)+360)%360/30), sc=Math.abs(d-520);
+      if(!buckets[br]||sc<buckets[br].sc) buckets[br]={k:k,sc:sc}; });
+    var cands=Object.keys(buckets).map(function(b){ return buckets[b].k; }), bestL=null, bestSc=Infinity;
+    cands.forEach(function(T){
+      var p1=pathTo(D0,S,T); if(!p1||!p1.length) return;
+      var banned={}, nm1={}; p1.forEach(function(x){ banned[x.ed.id]=1; if(x.ed.nm) nm1[dNorm(x.ed.nm)]=1; });
+      var D2=dijk(T,banned,nm1), p2=pathTo(D2,T,S); if(!p2||!p2.length) return;
+      var len=D0.raw[T]+D2.raw[S], shared=0, seen={};
+      p2.forEach(function(x){ var k=x.ed.nm?dNorm(x.ed.nm):''; if(k&&nm1[k]&&!seen[k]){ shared++; seen[k]=1; } });
+      if(len<700) return;
+      var sc=shared*5000+(len>2800?len-2800:0)-Math.min(len,2500);
+      if(sc<bestSc){ bestSc=sc; bestL=p1.concat(p2); }
+    });
+    var fb=false;
+    if(!bestL){
+      /* pas de boucle possible : aller en explorant des rues différentes, puis retour par la même route une seule fois, à la fin */
+      var fbk={}; N.forEach(function(n,k){ var d=D0.raw[k]; if(!isFinite(d)||d<120||d>900) return;
+        var br=Math.floor(((Math.atan2((n.lo-lo)*Math.cos(la*Math.PI/180),n.la-la)*180/Math.PI)+360)%360/30);
+        if(!fbk[br]||d>fbk[br].d) fbk[br]={k:k,d:d}; });
+      var bestF=null, bestFs=-1;
+      Object.keys(fbk).forEach(function(b){
+        var p1=pathTo(D0,S,fbk[b].k); if(!p1||!p1.length) return;
+        var nmz={}, cnt=0; p1.forEach(function(x){ var k=x.ed.nm?dNorm(x.ed.nm):''; if(k&&!nmz[k]){ nmz[k]=1; cnt++; } });
+        var sc=cnt*1000+fbk[b].d; if(sc>bestFs){ bestFs=sc; bestF=p1; }
+      });
+      if(!bestF) throw new Error('quartier trop petit pour un tour');
+      bestL=bestF.concat(bestF.slice().reverse().map(function(x){ return {from:x.to,to:x.from,ed:x.ed}; }));
+      fb=true;
+    }
+    var pts=[[la,lo]], seg=[''];
+    pts.push([N[S].la,N[S].lo]); seg.push('');
+    bestL.forEach(function(x){ pts.push([N[x.to].la,N[x.to].lo]); seg.push(x.ed.nm||''); });
+    pts.push([la,lo]); seg.push('');
+    return {line:pts,seg:seg,fb:fb};
+  }
+
+  async function tourRouteOsrm(la,lo){
+    var pts=[[la,lo]]; for(var b=0;b<360;b+=60) pts.push(tourBear(la,lo,b,300)); pts.push([la,lo]);
+    var jj=await jget('https://router.project-osrm.org/route/v1/driving/'+pts.map(function(q){ return q[1].toFixed(6)+','+q[0].toFixed(6); }).join(';')+'?overview=false&geometries=geojson&steps=true',15000);
+    var rt=jj&&jj.routes&&jj.routes[0]; if(!rt||!rt.legs) throw new Error('itinéraire indisponible');
+    var line=[[la,lo]], seg=[''];
+    rt.legs.forEach(function(lg){ (lg.steps||[]).forEach(function(st){
+      var c=(st.geometry&&st.geometry.coordinates)||[]; if(!c.length) return;
+      if(line.length===1){ line.push([c[0][1],c[0][0]]); seg.push(''); }
+      for(var i=1;i<c.length;i++){ line.push([c[i][1],c[i][0]]); seg.push(st.name||''); }
+    }); });
+    line.push([la,lo]); seg.push('');
+    if(line.length<4) throw new Error('itinéraire vide');
+    return {line:line,seg:seg,fb:false,approx:true};
+  }
+  async function tourRoute(la,lo){
+    var errs=[];
+    for(var rad of [450,300]){
+      try{ return await tourRouteOsm(la,lo,rad); }
+      catch(e){ errs.push(e&&e.message||String(e)); try{ console.warn('tour osm',rad,e); }catch(x){} }
+    }
+    try{ return await tourRouteOsrm(la,lo); }
+    catch(e){ errs.push('secours : '+(e&&e.message||String(e))); }
+    var R=tourRouteRing(la,lo); R.why=errs.join(' / '); return R;
+  }
+  /* dernier recours, sans aucun réseau : boucle autour de toi en 8 secteurs (Street View se cale sur la route la plus proche) */
+  function tourRouteRing(la,lo){
+    var NM=['nord','nord-est','est','sud-est','sud','sud-ouest','ouest','nord-ouest'], pts=[[la,lo]], seg=[''];
+    for(var k=0;k<8;k++){ pts.push(tourBear(la,lo,k*45,250)); seg.push('secteur '+NM[k]); }
+    pts.push([la,lo]); seg.push('');
+    return {line:pts,seg:seg,fb:false,approx:true};
+  }
+  /* une seule étape par rue (jamais deux fois la même avenue), au milieu de chaque tronçon */
+  function tourStops(R){
+    var pts=R.line, seg=R.seg, runs=[], total=0;
+    for(var k=1;k<pts.length;k++){
+      var d=dHav(pts[k-1][0],pts[k-1][1],pts[k][0],pts[k][1]); total+=d;
+      var nm=seg[k]||'', key=dNorm(nm), r=runs[runs.length-1];
+      if(r&&r.key===key){ r.pts.push(pts[k]); r.len+=d; } else runs.push({key:key,nm:nm,pts:[pts[k-1],pts[k]],len:d});
+    }
+    var seen={}, out=[];
+    runs.forEach(function(r){
+      if(r.key){ if(seen[r.key]||r.len<25) return; seen[r.key]=1; } else if(r.len<80) return;
+      var half=r.len/2, acc=0, p=r.pts[r.pts.length-1];
+      for(var i=1;i<r.pts.length;i++){ var d=dHav(r.pts[i-1][0],r.pts[i-1][1],r.pts[i][0],r.pts[i][1]);
+        if(acc+d>=half){ var f=d?(half-acc)/d:0; p=[r.pts[i-1][0]+(r.pts[i][0]-r.pts[i-1][0])*f, r.pts[i-1][1]+(r.pts[i][1]-r.pts[i-1][1])*f]; break; } acc+=d; }
+      out.push({p:p,nm:r.nm});
+    });
+    while(out.length>40){ out=out.filter(function(_,i){ return i%2===0; }); }
+    var endP=pts[pts.length-1];
+    while(out.length&&!out[out.length-1].nm&&dHav(out[out.length-1].p[0],out[out.length-1].p[1],endP[0],endP[1])<150) out.pop();
+    out.push({p:pts[pts.length-1],nm:'',last:true});
+    return {stops:out,total:total};
+  }
+  function tourIcon(){ return L.divIcon({className:'',html:'<div style="width:34px;height:34px;border-radius:50%;background:#ff9800;border:3px solid #fff;box-shadow:0 0 0 4px rgba(255,152,0,.45);display:flex;align-items:center;justify-content:center;font-size:18px">👆</div>',iconSize:[34,34],iconAnchor:[17,17]}); }
+  function tourClear(){
+    if(!tour) return;
+    try{ if(tour.mk) map.removeLayer(tour.mk); if(tour.pl) map.removeLayer(tour.pl); }catch(e){}
+    clearInterval(tourIv); tourIv=null; tour=null;
+    try{ tBtn.style.opacity='1'; tBtn.textContent='🏘️'; }catch(e){}
+  }
+  function tourEnd(done){
+    if(!tour) return;
+    tourClear(); svPos=null; svLast=null; svFT=Date.now();
+    if(done){
+      if(meLast){ svOpen(); }
+      speakAdd('Tour du quartier terminé. Retour à ton point de départ.');
+      say('🏘️ Tour terminé — retour à ta position',5000);
+    } else {
+      try{ speechSynthesis.cancel(); }catch(e){}
+      say('🏘️ Tour du quartier arrêté',3000);
+    }
+  }
+  /* ===== services du quartier (pharmacie, mosquée, hôpital, banque…) : lus pendant le tour quand ils sont trouvés ===== */
+  var TOUR_PLBL={pharmacy:['pharmacie','pharmacies'],mosque:['mosquée','mosquées'],hospital:['hôpital','hôpitaux'],clinic:['clinique','cliniques'],doctors:['cabinet médical','cabinets médicaux'],dentist:['dentiste','dentistes'],atm:['distributeur de billets','distributeurs de billets'],bank:['banque','banques'],fuel:['station-service','stations-service'],post:['bureau de poste','bureaux de poste'],police:['poste de police','postes de police'],supermarket:['supermarché','supermarchés'],bakery:['boulangerie','boulangeries'],school:['école','écoles'],cafe:['café','cafés'],restaurant:['restaurant','restaurants']};
+  var TOUR_PORD=['pharmacy','mosque','hospital','clinic','doctors','dentist','atm','bank','fuel','post','police','supermarket','bakery','school','cafe','restaurant'];
+  function tourPType(t){
+    var a=t.amenity, sh=t.shop;
+    if(a==='pharmacy') return 'pharmacy'; if(a==='place_of_worship') return t.religion==='muslim'?'mosque':null;
+    if(a==='hospital'||a==='clinic'||a==='doctors'||a==='dentist'||a==='atm'||a==='bank'||a==='fuel'||a==='police'||a==='school'||a==='cafe'||a==='restaurant') return a;
+    if(a==='post_office') return 'post'; if(sh==='supermarket'||sh==='bakery') return sh; return null;
+  }
+  var TOUR_PCACHE=null;
+  async function tourPois(la,lo){
+    if(!TOUR_PCACHE){ TOUR_PCACHE=[]; try{ var r=JSON.parse(localStorage.getItem('tour_poi')||'[]'); if(Array.isArray(r)) TOUR_PCACHE=r; }catch(e){} }
+    var now=Date.now();
+    for(var i=TOUR_PCACHE.length-1;i>=0;i--){ var c=TOUR_PCACHE[i]; if(c&&c.p&&now-c.t<7*86400000&&dHav(c.la,c.lo,la,lo)<=150) return c.p; }
+    var R=550, ar='(around:'+R+','+la+','+lo+')';
+    var q='[out:json][timeout:14];(nwr["amenity"~"^(pharmacy|hospital|clinic|doctors|dentist|atm|bank|fuel|cafe|restaurant|post_office|police|school)$"]'+ar+';nwr["amenity"="place_of_worship"]["religion"="muslim"]'+ar+';nwr["shop"~"^(supermarket|bakery)$"]'+ar+';);out center tags 400;';
+    var jj=await ovp(q), out=[];
+    ((jj&&jj.elements)||[]).forEach(function(e){
+      var t=e.tags||{}, ty=tourPType(t), pla=e.lat!=null?e.lat:(e.center&&e.center.lat), plo=e.lon!=null?e.lon:(e.center&&e.center.lon);
+      if(!ty||pla==null) return;
+      out.push({id:e.type+e.id,t:ty,a:String(t['name:ar']||'').trim(),n:String(t['name:fr']||t.name||'').trim(),la:+pla.toFixed(6),lo:+plo.toFixed(6)});
+    });
+    TOUR_PCACHE.push({la:la,lo:lo,t:now,p:out});
+    try{ localStorage.setItem('tour_poi',JSON.stringify(TOUR_PCACHE.slice(-3))); }catch(e){}
+    return out;
+  }
+  function tourPlural(ty,n){ var l=TOUR_PLBL[ty]; return n+' '+(n>1?l[1]:l[0]); }
+  function tourSvcSummary(pois,la,lo){
+    var cnt={}; pois.forEach(function(x){ if(dHav(la,lo,x.la,x.lo)<=450) cnt[x.t]=(cnt[x.t]||0)+1; });
+    var parts=TOUR_PORD.filter(function(k){ return cnt[k]; }).slice(0,8).map(function(k){ return tourPlural(k,cnt[k]); });
+    return parts.length?'Dans ce quartier, j\u2019ai trouvé : '+parts.join(', ')+'.':'';
+  }
+  function tourSvcText(q){
+    if(!tour||!tour.pois||!tour.pois.length) return '';
+    var near=[];
+    tour.pois.forEach(function(x){ if(tour.said[x.id]) return; var d=dHav(q[0],q[1],x.la,x.lo); if(d<=120) near.push({x:x,d:d}); });
+    near.sort(function(a,b){ return (TOUR_PORD.indexOf(a.x.t)-TOUR_PORD.indexOf(b.x.t))||(a.d-b.d); });
+    near=near.slice(0,3); if(!near.length) return '';
+    near.forEach(function(o){ tour.said[o.x.id]=1; });
+    return 'À proximité : '+near.map(function(o){ var l=TOUR_PLBL[o.x.t][0], n=(AR&&o.x.a)?o.x.a:o.x.n, t=(n&&dNorm(n).indexOf(dNorm(l).split(' ')[0])>-1)?n:(l+(n?' '+n:'')); return t.charAt(0).toUpperCase()+t.slice(1)+', à '+fmtM(o.d); }).join('. ')+'.';
+  }
+  /* « 100 mètres, tourne à gauche, puis 150 mètres, tourne à droite… » à partir des étapes de l'itinéraire à pied */
+  var TD_MOD={'left':'tourne à gauche','right':'tourne à droite','slight left':'tourne légèrement à gauche','slight right':'tourne légèrement à droite','sharp left':'tourne franchement à gauche','sharp right':'tourne franchement à droite','uturn':'fais demi-tour'};
+  function tourDirs(rt){
+    var st=(rt.legs&&rt.legs[0]&&rt.legs[0].steps)||[]; if(st.length<2) return '';
+    var first=st[0], card=D_CARD[Math.round(((first.maneuver&&first.maneuver.bearing_after)||0)/45)%8];
+    var items=[], acc=first.distance||0;
+    for(var i=1;i<st.length;i++){
+      var s2=st[i], m=s2.maneuver||{}, ty=m.type, md=m.modifier, phrase='';
+      if(ty==='arrive'){ items.push(fmtM(acc)+', tu es arrivé'); acc=0; break; }
+      if(ty==='roundabout'||ty==='rotary'||ty==='roundabout turn'){ phrase='au rond-point, prends la '+(m.exit||1)+((m.exit||1)===1?'re':'e')+' sortie'; }
+      else if(ty==='exit roundabout'||ty==='exit rotary'){ acc+=s2.distance||0; continue; }
+      else if(md&&TD_MOD[md]){ phrase=(ty==='fork'?'à la bifurcation, ':'')+TD_MOD[md]; }
+      else { acc+=s2.distance||0; continue; }  /* tout droit / même rue : on cumule la distance */
+      if(acc<8&&items.length){ items[items.length-1]+=' puis '+phrase; acc=s2.distance||0; continue; }
+      items.push(fmtM(acc)+', '+phrase+(s2.name&&s2.name.length<40&&ty!=='roundabout'&&ty!=='rotary'?' sur '+s2.name:''));
+      acc=s2.distance||0;
+    }
+    if(!items.length) return 'Pour y aller : va tout droit, '+fmtM(first.distance||0)+'.';
+    var more=items.length>8; if(more) items=items.slice(0,7);
+    var pre=(first.distance>=1?'Pour y aller à pied : pars vers '+((card==='est'||card==='ouest')?'l\u2019':'le ')+card+', ':'Pour y aller à pied : ');
+    return pre+items.join(', puis ')+(more?', puis suis l\u2019itinéraire jusqu\u2019à la rue.':'.');
+  }
+  /* introduction de chaque étape : direction par rapport à toi + distances à vol d'oiseau, en voiture et à pied */
+  function tourMin(sec){ var m=Math.max(1,Math.round(sec/60)); return m<60?m+(m<=1?' minute':' minutes'):Math.floor(m/60)+' h '+(m%60?(m%60)+' min':''); }
+  async function tourPre(q,st){
+    if(!meLast) return '';
+    var la=meLast.lat, lo=meLast.lon, d=dHav(la,lo,q[0],q[1]);
+    if(st&&st.last) return 'Retour à ton point de départ.';
+    if(st&&!st.nm){ var sv0=''; try{ sv0=tourSvcText(q); }catch(e){} return 'Je ne la situe pas, son nom n\u2019est pas connu. '+sv0; }
+    var thing=(st&&st.nm)?'Cette rue':'Cet endroit';
+    if(d<20) return thing+' est tout près de toi. '+(function(){ try{ return tourSvcText(q); }catch(e){ return ''; } })();
+    var card=D_CARD[Math.round(dBearing(la,lo,q[0],q[1])/45)%8];
+    var out=thing+' se situe '+((card==='est'||card==='ouest')?'à l\u2019':'au ')+card+' de toi. À vol d\u2019oiseau, '+fmtM(d)+'.';
+    var c=lo+','+la+';'+q[1]+','+q[0];
+    var rs=await Promise.allSettled([
+      jget('https://router.project-osrm.org/route/v1/driving/'+c+'?overview=false',6000),
+      jget('https://routing.openstreetmap.de/routed-foot/route/v1/foot/'+c+'?overview=false&steps=true',6000)
+    ]);
+    function leg(r,estSpeed,label){
+      var rt=r.status==='fulfilled'&&r.value&&r.value.routes&&r.value.routes[0];
+      if(rt) return label+', '+fmtM(rt.distance)+', environ '+tourMin(rt.duration)+'.';
+      var dist=d*1.3; return label+', environ '+fmtM(dist)+', environ '+tourMin(dist/estSpeed)+' (estimation).';
+    }
+    out+=' '+leg(rs[0],8.3,'En voiture')+' '+leg(rs[1],1.25,'À pied');
+    try{ var fr=rs[1].status==='fulfilled'&&rs[1].value&&rs[1].value.routes&&rs[1].value.routes[0]; var dr=fr?tourDirs(fr):''; if(dr) out+=' '+dr; }catch(e){}
+    try{ var sv=tourSvcText(q); if(sv) out+=' '+sv; }catch(e){}
+    return out;
+  }
+  function tourStep(){
+    if(!tour||tour.busy) return;
+    var now=Date.now(); if(now-tour.last<TOUR_MS) return;
+    try{ if(window.speechSynthesis&&(speechSynthesis.speaking||speechSynthesis.pending)) return; }catch(e){}
+    if(tour.i>=tour.stops.length){ tourEnd(true); return; }
+    var st=tour.stops[tour.i++], q=st.p; tour.last=now;
+    var isLast=!!st.last;
+    try{ tour.mk.setLatLng(q); map.panTo(q); }catch(e){}
+    svOpen(q[0],q[1],isLast?'Étape finale, retour à ton point de départ.':(st.nm?st.nm:'Rue sans nom connue')+'. Étape '+tour.i+' sur '+tour.stops.length+'.',tourPre(q,st));
+    say('🏘️ '+tour.i+'/'+tour.stops.length,2500);
+  }
+  async function tourStart(){
+    if(tour){ tourEnd(false); return; }
+    if(!meLast){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); start(); return; }
+    var la=meLast.lat, lo=meLast.lon;
+    tour={busy:true,i:0,stops:[],last:0,mk:null,pl:null,pois:[],said:{}};
+    tBtn.textContent='⏹️';
+    say('🏘️ Préparation du tour du quartier…',8000); speak('Tour du quartier. Je prépare le parcours.');
+    var R0, tk=tour, poiP=tourPois(la,lo).then(function(pp){ tk.pois=pp||[]; return tk.pois; }).catch(function(){ return []; });
+    try{ R0=await tourRoute(la,lo); }
+    catch(e){ if(tour!==tk) return; tourClear(); speakAdd('Impossible de préparer le tour du quartier. Réessaie dans un instant.'); say('⚠️ Tour du quartier impossible : '+(e&&e.message||e),20000); return; }
+    if(tour!==tk) return;
+    var T=tourStops(R0), line=R0.line;
+    tour.stops=T.stops;
+    tour.pl=L.polyline(line,{color:'#ff9800',weight:4,opacity:.85,dashArray:'6 6',interactive:false}).addTo(map);
+    tour.mk=L.marker([la,lo],{icon:tourIcon(),zIndexOffset:150000,interactive:false}).addTo(map);
+    try{ map.fitBounds(tour.pl.getBounds(),{padding:[30,30],maxZoom:17}); }catch(e){}
+    speakAdd('Parcours d\u2019environ '+fmtM(T.total)+', '+T.stops.length+' étapes, une toutes les vingt secondes.'+(R0.fb?' Pas de boucle possible ici : retour par la même rue à la fin.':'')+(R0.approx?' Parcours approximatif.':''));
+    try{ var nms=T.stops.filter(function(x){ return x.nm; }).map(function(x){ return x.nm; }); if(nms.length) speakAdd('Le tour passe par : '+nms.slice(0,12).join(', ')+'.'); }catch(e){}
+    try{ await Promise.race([poiP,new Promise(function(r){ setTimeout(r,5000); })]); var sm=tourSvcSummary(tk.pois||[],la,lo); if(sm) speakAdd(sm); }catch(e){}
+    if(tour!==tk) return;
+    if(R0.why){ try{ console.warn('tour',R0.why); }catch(e){} say('ℹ️ Parcours approximatif — '+R0.why,10000); }
+    tour.last=Date.now()-TOUR_MS+4000; tour.busy=false;
+    tourIv=setInterval(tourStep,1500);
+  }
+  var tBtn=null;
+  try{
+    tBtn=document.createElement('button'); tBtn.id='meTourBtn'; tBtn.textContent='🏘️'; tBtn.title='جولة في الحي / Tour du quartier';
+    dBtn.parentNode.insertBefore(tBtn,dBtn.nextSibling);
+    tBtn.onclick=tourStart;
+  }catch(e){ try{ console.warn('tour btn',e); }catch(x){} }
+
+  try{
+    var lBtn=document.createElement('button'); lBtn.id='meLangBtn'; lBtn.textContent=AR?'FR':'ع'; lBtn.title='العربية / Français';
+    (tBtn||dBtn).parentNode.insertBefore(lBtn,(tBtn||dBtn).nextSibling);
+    lBtn.onclick=function(){
+      AR=!AR; ME_SAY_LANG=AR?'ar-SA':'fr-FR';
+      try{ localStorage.setItem('lang_ar',AR?'1':'0'); }catch(e){}
+      try{ speechSynthesis.cancel(); }catch(e){}
+      descCache={}; cityDone='';
+      lBtn.textContent=AR?'FR':'ع';
+      var msg=AR?'تم تفعيل اللغة العربية':'Français activé';
+      say('🌐 '+msg,2500); speak(msg);
+    };
+  }catch(e){ try{ console.warn('lang btn',e); }catch(x){} }
   /* طبقة تغطية Street View (الخطوط الزرقاء) + ضغطة مطوّلة على الخريطة لفتح Street View هناك */
   var svCov=L.tileLayer('https://mts1.googleapis.com/vt?hl=fr&lyrs=svv|cb_client:apiv3&style=40,18&x={x}&y={y}&z={z}',{maxZoom:21,opacity:.85,zIndex:450}), svCovOn=true; svCov.addTo(map);
   map.on('click',function(ev){
@@ -4168,6 +4674,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function onPos(p){
     var lat=p.coords.latitude, lon=p.coords.longitude, acc=p.coords.accuracy||0;
     meLast={lat:lat,lon:lon};
+    try{ tourPrefetch(); }catch(e){}
     try{ svFollow(lat,lon); }catch(e){}
     meAcc=acc; var html=meHtml();
     if(!meMarker){
@@ -4185,6 +4692,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       firstFix=false;
       try{ fitted=true; }catch(e){}   /* لا نترك fitBounds الخاص بالمستخدمين يسحب الخريطة بعيداً عن موقعك */
       map.setView([lat,lon],Math.max(map.getZoom(),15));
+      /* si l'utilisateur ne met pas le curseur ailleurs : Street View démarre seul à ma position et parle */
+      setTimeout(function(){ try{ if(!svUserPick&&(!svBox||svBox.style.display==='none')) svOpen(); }catch(e){} },1500);
     }
   }
   function onErr(e){
@@ -4202,7 +4711,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     else { start(); say('📡 جارٍ تحديد موقعك…',3000); }
   };
   /* ===== 🆘 secousse violente du téléphone = SOS : cercle rouge + HELP qui se propage, diffusé à tous (ala_store) ===== */
-  var SOS_MS=60000, SHK_G=10, sosUntil=0, sosIv=null, shkN=0, shkT0=0, shkPk=0, sosOthers={}, sosLayer=L.layerGroup().addTo(map), shkDev=null, shkPerm=false;
+  var SOS_MS=60000, SHK_G=20, sosUntil=0, sosIv=null, shkN=0, shkT0=0, shkPk=0, sosOthers={}, sosLayer=L.layerGroup().addTo(map), shkDev=null, shkPerm=false;
   var SOS_HTML='<div class="rc r sos">HELP<i class="hp">HELP</i><i class="hp" style="animation-delay:.8s">HELP</i><i class="hp" style="animation-delay:1.6s">HELP</i></div>';
   function sosIcon(){ return L.divIcon({className:'',html:SOS_HTML,iconSize:[38,38],iconAnchor:[19,19]}); }
   function meIcon(){ return L.divIcon({className:'',html:'<div style="width:44px;height:44px;display:flex;align-items:center;justify-content:center"><div class="me-dot"></div></div>',iconSize:[44,44],iconAnchor:[22,22]}); }
@@ -4215,8 +4724,11 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   try{ var _t=localStorage.getItem('sos_tel'); if(_t) SOS_TEL=_t; }catch(e){}
   function sosShowCall(on){ try{ sosCall.style.display=on?'flex':'none'; sosCall.innerHTML='<span style="font-size:35vmin;line-height:1">📞</span><span style="font-size:11vmin;margin-top:2vmin">'+SOS_TEL+'</span>'; }catch(e){} }
   function sosStart(){
-    if(!meLast){ say('📡 فعّل الموقع أولاً (Position pas encore trouvée)',4000); start(); return; }
-    sosUntil=Date.now()+SOS_MS; setMeSos(true); sosPush(true);
+    /* HELP est prioritaire : il marche même pendant Street View, le tour du quartier ou sans position GPS */
+    try{ if(tour) tourEnd(false); }catch(e){}
+    try{ speechSynthesis.cancel(); }catch(e){}
+    if(!meLast){ try{ start(); }catch(e){} }
+    sosUntil=Date.now()+SOS_MS; try{ setMeSos(true); }catch(e){} sosPush(true);
     try{ if(navigator.vibrate) navigator.vibrate([200,100,200,100,400]); }catch(e){}
     say('🆘 HELP — تم إرسال الاستغاثة / Alerte envoyée',6000);
     sosShowCall(true);
@@ -4254,6 +4766,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   };
   document.addEventListener('touchend',askMotion,{once:true,passive:true});
   document.addEventListener('click',askMotion,{once:true});
+  document.addEventListener('touchend',askMotion,{once:true,capture:true});
   /* استقبال استغاثات الآخرين */
   async function sosPoll(){
     if(typeof pdbOff!=='undefined'&&pdbOff) return;
