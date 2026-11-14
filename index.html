@@ -4339,7 +4339,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!P){ if(force){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); } return; }
     if(!force&&!guideOn) return;
     var lat=P.lat, lon=P.lon, key=(AR?'a:':'f:')+(pos?'r:':'')+lat.toFixed(3)+','+lon.toFixed(3), hit=descCache[key];
-    if(hit&&Date.now()-hit.t<DESC_TTL){ descSeq++; descBusy=false; var sameH=quiet&&hit.city&&hit.city===cityDone, tx=sameH&&hit.short?hit.short:hit.txt; if(quiet&&hit.city) cityDone=hit.city; if(tour&&tour.pre){ try{ var pr0=await tour.pre; if(pr0) tx=pr0+' '+tx; }catch(e){} } showDesc(tx,''); return; }
+    if(hit&&Date.now()-hit.t<DESC_TTL){ var sq0=++descSeq; descBusy=false; var sameH=quiet&&hit.city&&hit.city===cityDone, tx=sameH&&hit.short?hit.short:hit.txt; if(quiet&&hit.city) cityDone=hit.city; if(tour&&tour.pre){ try{ var pr0=await tour.pre; if(pr0) tx=pr0+' '+tx; }catch(e){} } if(sq0!==descSeq) return; showDesc(tx,''); return; }
     if(descBusy&&descKey===key){ if(force) say('🌍 Analyse en cours, un instant…',4000); return; }
     var mySeq=++descSeq; descBusy=true; descKey=key;
     say('🌍 Analyse du lieu… (quelques secondes)',20000);
@@ -4479,8 +4479,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     speak(tour?tour:'Street View. Je regarde le lieu.');
-    describeHere(true,svPos,true,tour?{pre:pre}:false);
-    svAiRead(lat,lon,0);
+    var dpS=describeHere(true,svPos,true,tour?{pre:pre}:false);
+    svAiRead(lat,lon,0,dpS); /* la scène Street View est lue APRÈS le lieu (restaurants, mosquées, services...) */
   }
   var svLast=null;
   /* suivi : on se met à jour au plus toutes les 20 s, et seulement quand la lecture vocale précédente est finie */
@@ -4493,8 +4493,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     var p=svPend; svPend=null; svFT=now; svLast={lat:p.lat,lon:p.lon};
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+p.lat+','+p.lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+p.lat.toFixed(4)+', '+p.lon.toFixed(4)+' — 🌍 Analyse du lieu…';
-    describeHere(true,null,true);
-    svAiRead(p.lat,p.lon,0);
+    var dpT=describeHere(true,null,true);
+    svAiRead(p.lat,p.lon,0,dpT);
   }
   setInterval(svTick,2000);
 
@@ -4503,24 +4503,42 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   var SVDB_URL='https://dpmgtuhgwmnuhefwatbf.supabase.co/rest/v1/ala_store', SVDB_KEY='sb_publishable_cmj3m3go11BMP07E6SLUSw_Aw-c4R2U';
   async function svdbGet(key){ try{ var r=await fetch(SVDB_URL+'?kind=eq.svdesc&key=eq.'+encodeURIComponent(key)+'&select=data&limit=1',{headers:{apikey:SVDB_KEY}}); if(!r.ok) return null; var j=await r.json(); return (j&&j[0]&&j[0].data)?j[0].data:null; }catch(e){ return null; } }
   function svdbPut(key,data){ try{ fetch(SVDB_URL+'?on_conflict=kind,key',{method:'POST',headers:{apikey:SVDB_KEY,Authorization:'Bearer '+SVDB_KEY,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([{kind:'svdesc',key:key,data:data,updated_at:new Date().toISOString()}])}); }catch(e){} }
+  /* cherche la description la plus proche (<= 150 m) : les points stockés ne tombent jamais pile sur le clic */
+  async function svdbNear(lat,lon){
+    try{
+      var L=AR?'a':'f', ps=[-0.002,-0.001,0,0.001,0.002].map(function(d){ return 'key.like.sv:'+L+':'+(lat+d).toFixed(3)+'*'; });
+      var r=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+ps.join(',')+')&select=data&limit=300',{headers:{apikey:SVDB_KEY}});
+      if(!r.ok) return null; var rows=await r.json(), best=null, bd=1e9;
+      rows.forEach(function(x){ var d=x.data; if(!d||d.lat==null||d.txt==null) return;
+        var dy=(d.lat-lat)*111320, dx=(d.lon-lon)*111320*Math.cos(lat*Math.PI/180), m=Math.sqrt(dx*dx+dy*dy);
+        if(m<bd){ bd=m; best=d; } });
+      return (best&&bd<=150)?{d:best,m:bd}:null;
+    }catch(e){ return null; }
+  }
   var SV_WORKER='';   /* URL du worker sv-describe (vide = désactivé) */
   var svAiSeq=0, svAiMem={};
   function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
-  function svAiShow(txt,fromCache){
+  function svAiShow(txt,fromCache,m){
     var t=document.getElementById('svTxt');
     if(t) t.textContent=(t.textContent||'')+'\n👁️ '+txt;
     if(!window.svAiWarned){ window.svAiWarned=1; speakAdd(AR?'وصف تلقائي، تأكد منه.':'Description automatique, à confirmer.'); }
+    if(m>25) speakAdd((AR?'أقرب وصف على بعد ':'Description la plus proche, à ')+Math.round(m)+(AR?' متر.':' mètres.'));
     speakAdd(txt);
     if(fromCache) say('👁️ (mémorisé) '+txt,15000);
   }
-  async function svAiRead(lat,lon,heading){
+  async function svAiRead(lat,lon,heading,after){
     var key=svAiKey(lat,lon), my=++svAiSeq;
     try{
-      var txt=svAiMem[key];
-      if(!txt){ try{ txt=localStorage.getItem('svai:'+key); }catch(e){} }
-      if(!txt){ var d=await svdbGet(key); if(d&&d.txt) txt=d.txt; }
-      if(txt){ svAiMem[key]=txt; if(my===svAiSeq) svAiShow(txt,true); return; }
-      if(!SV_WORKER) return; /* pas de worker : on ne lit que ce qui est déjà stocké */
+      var hit=svAiMem[key];
+      if(!hit){ var n=await svdbNear(lat,lon); if(n) hit=n; }
+      if(hit){ svAiMem[key]=hit;
+        if(after){ try{ await after; }catch(e){} }
+        if(my===svAiSeq){
+          if(hit.m>25){ try{ document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+hit.d.lat+','+hit.d.lon+'&cbp=12,0,0,0,0&output=svembed'; }catch(e){} }
+          svAiShow(hit.d.txt,true,hit.m);
+        }
+        return; }
+      if(!SV_WORKER){ if(my===svAiSeq) say('👁️ pas encore de description ici',4000); return; } /* pas de worker : on ne lit que ce qui est déjà stocké */
       var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr',heading:heading||0})});
       var j=await r.json();
@@ -4697,7 +4715,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!tour) return;
     try{ if(tour.mk) map.removeLayer(tour.mk); if(tour.pl) map.removeLayer(tour.pl); }catch(e){}
     clearInterval(tourIv); tourIv=null; tour=null;
-    try{ tBtn.style.opacity='1'; tBtn.textContent='🏘️'; }catch(e){}
+    try{ tBtn.style.opacity='1'; tBtn.textContent='🏘️'; kBtn.style.display='none'; }catch(e){}
   }
   function tourEnd(done){
     if(!tour) return;
@@ -4816,7 +4834,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!meLast){ speak('Position pas encore trouvée'); say('📡 Position pas encore trouvée',2500); start(); return; }
     var la=meLast.lat, lo=meLast.lon;
     tour={busy:true,i:0,stops:[],last:0,mk:null,pl:null,pois:[],said:{}};
-    tBtn.textContent='⏹️';
+    tBtn.textContent='⏹️'; try{ kBtn.style.display=''; }catch(e){}
     say('🏘️ Préparation du tour du quartier…',8000); speak('Tour du quartier. Je prépare le parcours.');
     var R0, tk=tour, poiP=tourPois(la,lo).then(function(pp){ tk.pois=pp||[]; return tk.pois; }).catch(function(){ return []; });
     try{ R0=await tourRoute(la,lo); }
@@ -4835,11 +4853,23 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     tour.last=Date.now()-TOUR_MS+4000; tour.busy=false;
     tourIv=setInterval(tourStep,1500);
   }
-  var tBtn=null;
+  var tBtn=null, kBtn=null;
+  function tourSkip(){
+    if(!tour){ say('⏭️ Aucune visite en cours',2500); return; }
+    if(tour.busy){ say('⏭️ Préparation en cours, un instant…',2500); return; }
+    svAiSeq++; try{ descSeq++; descBusy=false; }catch(e){}   /* annule la lecture de l\u2019étape en cours */
+    try{ speechSynthesis.cancel(); }catch(e){}
+    tour.last=0; setTimeout(tourStep,300);
+    say('⏭️ Étape suivante',2000);
+  }
   try{
     tBtn=document.createElement('button'); tBtn.id='meTourBtn'; tBtn.textContent='🏘️'; tBtn.title='جولة في الحي / Tour du quartier';
     dBtn.parentNode.insertBefore(tBtn,dBtn.nextSibling);
     tBtn.onclick=tourStart;
+    kBtn=document.createElement('button'); kBtn.id='meTourSkip'; kBtn.textContent='⏭️';
+    kBtn.title='تخطي هذه المحطة / Passer cette étape'; kBtn.setAttribute('aria-label','Passer cette étape de la visite du quartier');
+    kBtn.style.display='none'; kBtn.onclick=tourSkip;
+    tBtn.parentNode.insertBefore(kBtn,tBtn.nextSibling);
   }catch(e){ try{ console.warn('tour btn',e); }catch(x){} }
 
   try{
