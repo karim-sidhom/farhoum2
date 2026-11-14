@@ -17,7 +17,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 html,body{margin:0;height:100%;background:#0d1a6e;font-family:system-ui,sans-serif}
-#map{position:absolute;inset:0}
+#map{position:absolute;inset:0;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
 #bar{position:absolute;top:10px;right:10px;z-index:1000;background:#0d1a6eE6;color:#fff;border:1px solid #d4af37;border-radius:10px;padding:8px 12px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:calc(100vw - 40px)}
 #bar button,#bar select{background:#d4af37;color:#0d1a6e;border:0;border-radius:6px;padding:4px 8px;font-weight:700;cursor:pointer}
 #cnt,#tcnt{font-weight:700;color:#d4af37}
@@ -68,9 +68,35 @@ html,body{margin:0;height:100%;background:#0d1a6e;font-family:system-ui,sans-ser
 #zonePill.chg-d .zc,#zonePill.chg-g .zc{display:block}
 @keyframes zoneFlash{0%{transform:scale(1.12)}100%{transform:scale(1)}}
 </style>
+<style>
+/* MODE MINIMAL : au lancement, seulement la carte */
+html.minimal #bar,html.minimal #zonePill,html.minimal #risk,html.minimal #pwaBox,html.minimal #pwaUpd,html.minimal #meToast,html.minimal .leaflet-control-container{display:none!important}
+</style>
+<script>
+/* seule la voix marquée __ok (annonces de ce mode) est autorisée */
+(function(){ try{ var s=window.speechSynthesis; if(!s) return; var o=s.speak.bind(s);
+  s.speak=function(u){ if(window.__speechOpen||(u&&u.__ok)) return o(u); }; }catch(e){}
+  document.documentElement.classList.add('minimal'); })();
+</script>
+<style>
+.sr-only{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+#a11y{position:fixed;top:0;left:0;right:0;z-index:5000}
+#a11y button{display:block;width:100%;font:700 20px/1.3 system-ui,sans-serif;padding:16px;background:#d4af37;color:#0d1a6e;border:3px solid #0d1a6e;text-align:center}
+#a11y:focus-within{clip:auto}
+#a11y button.sr-only:focus{position:static!important;width:100%;height:auto;margin:0;padding:16px;clip:auto;clip-path:none;overflow:visible;white-space:normal;outline:4px solid #fff}
+#map:focus-visible{outline:4px solid #d4af37;outline-offset:-4px}
+</style>
 </head>
 <body>
-<div id="map"></div>
+<div id="a11y" role="region" aria-label="Commandes d'accessibilité">
+<h1 class="sr-only" id="a11yTitle">Carte de ma position</h1>
+<button type="button" class="sr-only" id="a11yFind">Trouver ma position GPS et lancer le tour du quartier</button>
+<button type="button" class="sr-only" id="a11yRepeat">Répéter la dernière annonce</button>
+<button type="button" class="sr-only" id="a11yStopVoice">Arrêter la voix</button>
+<button type="button" class="sr-only" id="a11ySr" aria-pressed="false">Mode lecteur d'écran : désactivé</button>
+</div>
+<div id="a11yLive" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="map" tabindex="0"></div>
 <div id="risk" class="risk-panel" style="display:none"></div>
 <div id="pwaBox"><img src="icons/icon-192.png" alt=""><span id="pwaTxt">ثبّت خريطة قطاري على جهازك</span><button id="pwaInstall">تثبيت</button><button id="pwaClose" aria-label="إغلاق">✕</button></div>
 <div id="pwaUpd"><span>يتوفر تحديث جديد</span><button id="pwaUpdBtn">تحديث</button></div>
@@ -3867,6 +3893,136 @@ if('serviceWorker' in navigator){
     if(Math.hypot(a.x-b.x,a.y-b.y)<=ME_TOUCH_PX){ announce(); if(meMarker) meMarker.openPopup(); }
     else if(guideOn&&!svCovOn) guide(a,b);
   });
+  /* ===== اللمس المطوّل (مكفوفون) : الخريطة تتحرّك ليصبح موقع الـ GPS تحت إصبعك ===== */
+  var LP_MS=650, LP_MOVE_PX=12, GPS_HIT_PX=30, lpTimer=null, lpStart=null, lpId=null, introDone=false, lpBusy=false, onGps=false, fingerDown=null;
+  var mapEl=map.getContainer();
+  mapEl.setAttribute('role','application');
+  mapEl.setAttribute('aria-label','Appuie longtemps sur n\u2019importe quel endroit de l\u2019écran. اضغط مطولاً على أي مكان من الشاشة');
+  function mySpeak(t,cb){
+    lastMsg=t;
+    if(srMode){ liveSay(t); if(cb) cb(); return; }
+    try{
+      if(!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      var u=new SpeechSynthesisUtterance(t); u.__ok=true; u.lang=ME_SAY_LANG; u.rate=0.95; u.volume=1;
+      if(cb) u.onstart=cb;
+      window.speechSynthesis.speak(u);
+    }catch(e){}
+  }
+  /* ===== Accessibilité VoiceOver / TalkBack ===== */
+  var srMode=false, lastMsg='', lastDown=0, liveEl=document.getElementById('a11yLive');
+  try{ srMode=localStorage.getItem('sr_mode')==='1'; }catch(e){}
+  function liveSay(t){ if(!liveEl) return; liveEl.textContent=''; setTimeout(function(){ liveEl.textContent=t; },60); }
+  function srUi(){ var b=document.getElementById('a11ySr'); if(!b) return;
+    b.setAttribute('aria-pressed',srMode?'true':'false');
+    b.textContent=AR?(srMode?'وضع قارئ الشاشة: مفعّل':'وضع قارئ الشاشة: متوقف'):("Mode lecteur d'écran : "+(srMode?'activé':'désactivé')); }
+  function setSr(v){ srMode=v; try{ localStorage.setItem('sr_mode',v?'1':'0'); }catch(e){} srUi(); }
+  function syncLang(){            /* la langue de la page suit la langue de la voix, pour que VoiceOver/TalkBack prononcent bien */
+    var l=AR?'ar':'fr'; if(document.documentElement.lang!==l) document.documentElement.lang=l;
+    document.documentElement.dir=AR?'rtl':'ltr';
+    mapEl.setAttribute('aria-label',AR?'خريطة. اضغط مطولاً على أي مكان من الشاشة':"Carte. Appuie longtemps sur n\u2019importe quel endroit de l\u2019écran");
+    var T={a11yTitle:AR?'خريطة موقعي':'Carte de ma position',a11yFind:AR?'حدّد موقعي وابدأ جولة الحي':'Trouver ma position GPS et lancer le tour du quartier',a11yRepeat:AR?'أعد آخر إعلان':'Répéter la dernière annonce',a11yStopVoice:AR?'أوقف الصوت':'Arrêter la voix'};
+    Object.keys(T).forEach(function(k){ var e=document.getElementById(k); if(e&&e.textContent!==T[k]) e.textContent=T[k]; });
+    srUi();
+    /* boutons de la barre : nom accessible = titre (au lieu d'un simple emoji) */
+    document.querySelectorAll('#bar button,#bar select,#svSos,#svClose').forEach(function(b){ if(!b.getAttribute('aria-label')){ var t=b.title||b.getAttribute('title'); if(t) b.setAttribute('aria-label',t); } });
+    var sel=document.getElementById('win'); if(sel) sel.setAttribute('aria-label',AR?'المدة الزمنية':'Période affichée');
+    var c=document.getElementById('svClose'); if(c) c.setAttribute('aria-label',AR?'إغلاق':'Fermer Street View');
+    var sb=document.getElementById('svSos'); if(sb) sb.setAttribute('aria-label',AR?'استغاثة':"Alerte d'aide");
+    var ifr=document.getElementById('svFrame'); if(ifr) ifr.setAttribute('title','Street View');
+    var st=document.getElementById('svTxt'); if(st){ st.setAttribute('role','status'); st.setAttribute('aria-live','polite'); }
+  }
+  setInterval(syncLang,1500);
+  /* pendant le mode minimal : les repères de la carte n'encombrent pas le lecteur d'écran */
+  try{ map.getPane('mapPane').setAttribute('aria-hidden','true'); }catch(e){}
+  function a11yFind(){ var r=mapEl.getBoundingClientRect(); alignTo({x:r.width/2,y:r.height/2}); }
+  document.getElementById('a11yFind').onclick=function(){ setSr(true); a11yFind(); };
+  document.getElementById('a11yRepeat').onclick=function(){ mySpeak(lastMsg||introText()); };
+  document.getElementById('a11yStopVoice').onclick=function(){ try{ speechSynthesis.cancel(); }catch(e){} liveSay(AR?'تم إيقاف الصوت':'Voix arrêtée'); };
+  document.getElementById('a11ySr').onclick=function(){ setSr(!srMode); liveSay(srMode?(AR?'وضع قارئ الشاشة مفعّل':"Mode lecteur d'écran activé"):(AR?'وضع قارئ الشاشة متوقف':"Mode lecteur d'écran désactivé")); };
+  /* clavier / activation du lecteur d'écran sur la carte */
+  mapEl.addEventListener('keydown',function(ev){ if((ev.key==='Enter'||ev.key===' ')&&minimalOn){ ev.preventDefault(); a11yFind(); } });
+  /* appui long du lecteur d'écran (menu contextuel / action « long clic ») */
+  mapEl.addEventListener('contextmenu',function(ev){ if(minimalOn&&Date.now()-lastDown>900){ setSr(true); a11yFind(); } },true);
+  /* intro : avec un lecteur d'écran déjà actif, elle passe par la région live */
+  window.addEventListener('load',function(){ syncLang(); });
+  syncLang();
+  function introText(){ return AR ? 'اضغط مطولاً على أي مكان من الشاشة' : 'Appuie longtemps sur n\u2019importe quel endroit de l\u2019écran'; }
+  function speakIntro(){ mySpeak(introText(),function(){ introDone=true; }); }
+  var tourAuto=false, minimalOn=true;
+  function restoreUI(){            /* fin du tour : les boutons réapparaissent en haut, tout redevient normal */
+    if(!minimalOn) return; minimalOn=false;
+    window.__speechOpen=true;
+    document.documentElement.classList.remove('minimal');
+    try{ map.invalidateSize(); map.getPane('mapPane').removeAttribute('aria-hidden'); }catch(e){}
+    try{ liveSay(AR?'انتهت الجولة. الأزرار ظاهرة في الأعلى':'Tour terminé. Les boutons sont affichés en haut de l\u2019écran.'); }catch(e){}
+  }
+  var _tourClear=tourClear; tourClear=function(){ var r=_tourClear.apply(this,arguments); restoreUI(); return r; };
+  /* ===== si le GPS bouge de 15 m : lecture Street View à la position, puis toutes les 20 s le long de la trajectoire (ville non répétée) ===== */
+  var followRef=null;
+  setInterval(function(){
+    try{
+      if(tour||!meLast) return;
+      if(svBox&&svBox.style.display!=='none'){ followRef=null; return; }   /* déjà ouvert : svFollow gère les 20 s / 15 m */
+      if(!followRef){ followRef={lat:meLast.lat,lon:meLast.lon}; return; }
+      if(map.distance([followRef.lat,followRef.lon],[meLast.lat,meLast.lon])>=15){
+        followRef=null; window.__speechOpen=true; svOpen();
+      }
+    }catch(e){}
+  },2000);
+  function hereAnnounce(){         /* deux vibrations + « Tu es ici », puis le tour de quartier démarre (obligatoire) */
+    buzz([250,120,250]); mySpeak(AR?'أنت هنا':'Tu es ici');
+    if(tourAuto) return; tourAuto=true;
+    setTimeout(function(){ try{ window.__speechOpen=true; if(!tour) tourStart(); }catch(e){ restoreUI(); } },2300);
+  }
+  setTimeout(function(){ if(!introDone) speakIntro(); },1500);
+  function lpCancel(){ clearTimeout(lpTimer); lpTimer=null; lpStart=null; lpId=null; }
+  function gpsPt(){ return meLast?map.latLngToContainerPoint([meLast.lat,meLast.lon]):null; }
+  function checkHit(){            /* le doigt explore : deux vibrations quand il touche le point GPS */
+    if(!fingerDown||lpBusy) return;
+    var a=gpsPt(); if(!a) return;
+    var hit=Math.hypot(a.x-fingerDown.x,a.y-fingerDown.y)<=GPS_HIT_PX;
+    if(hit&&!onGps){ onGps=true; hereAnnounce(); } else if(!hit) onGps=false;
+  }
+  function lpFire(){ var st=lpStart; lpTimer=null; if(!st) return; alignTo(st); }
+  function alignTo(st){
+    if(!meLast){ buzz(80); mySpeak(AR?'لم يتم تحديد موقعك بعد':'Position pas encore trouvée'); try{ start(); }catch(e){} return; }
+    if(lpBusy) return; lpBusy=true;
+    var A=gpsPt(), dx=A.x-st.x, dy=A.y-st.y, done=false;
+    function arrived(){ if(done) return; done=true; lpBusy=false; onGps=true; hereAnnounce(); }
+    if(Math.hypot(dx,dy)<2){ arrived(); return; }
+    map.once('moveend',arrived);
+    map.panBy([dx,dy],{animate:true,duration:0.7,easeLinearity:0.4});
+    setTimeout(arrived,1500);
+  }
+  mapEl.addEventListener('pointerdown',function(ev){
+    lastDown=Date.now();
+    if(!introDone && ev.pointerType==='touch') speakIntro();
+    if(!ev.isPrimary){ lpCancel(); return; }
+    var r=mapEl.getBoundingClientRect();
+    lpCancel(); lpId=ev.pointerId; onGps=false;
+    lpStart={x:ev.clientX-r.left,y:ev.clientY-r.top,cx:ev.clientX,cy:ev.clientY};
+    fingerDown={x:lpStart.x,y:lpStart.y};
+    lpTimer=setTimeout(lpFire,LP_MS);
+    checkHit();
+  },true);
+  mapEl.addEventListener('pointermove',function(ev){
+    if(ev.pointerId!==lpId) return;
+    var r=mapEl.getBoundingClientRect(); fingerDown={x:ev.clientX-r.left,y:ev.clientY-r.top};
+    if(lpStart&&Math.hypot(ev.clientX-lpStart.cx,ev.clientY-lpStart.cy)>LP_MOVE_PX) lpCancel();
+    checkHit();
+  },true);
+  map.on('move',checkHit);
+  ['pointerup','pointercancel'].forEach(function(n){ mapEl.addEventListener(n,function(ev){ if(ev.pointerId===lpId){ lpCancel(); fingerDown=null; onGps=false; } },true); });
+  mapEl.addEventListener('contextmenu',function(ev){ ev.preventDefault(); },true);
+  /* rien d'autre : aucun clic sur la carte (pas de Street View, pas de guidage, pas de fenêtres) */
+  mapEl.addEventListener('click',function(ev){
+    if(minimalOn){
+      ev.stopPropagation(); ev.preventDefault();
+      if(Date.now()-lastDown>900){ setSr(true); a11yFind(); }   /* double-toucher VoiceOver/TalkBack : même effet que l'appui long, au centre */
+    }
+  },true);
+
   /* ===== لمس مقهى أو مطعم: الاسم + المسافة بالأمتار + الاتجاه (en haut / en bas / à gauche / à droite) ===== */
   var FOOD_RE=/☕|🍽|🍴|🍔/;
   function isFoodMarker(l){
@@ -4693,7 +4849,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       try{ fitted=true; }catch(e){}   /* لا نترك fitBounds الخاص بالمستخدمين يسحب الخريطة بعيداً عن موقعك */
       map.setView([lat,lon],Math.max(map.getZoom(),15));
       /* si l'utilisateur ne met pas le curseur ailleurs : Street View démarre seul à ma position et parle */
-      setTimeout(function(){ try{ if(!svUserPick&&(!svBox||svBox.style.display==='none')) svOpen(); }catch(e){} },1500);
+      
     }
   }
   function onErr(e){
@@ -4845,7 +5001,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       var gChg=prev.g!==d.g;
       h+='<div class="zc">'+(gChg?'⚠️ انتقلت من ولاية '+gName(prev)[0]+' إلى ولاية '+g[0]+'<br>':'')+'↔️ من معتمدية '+prev.ar+' إلى معتمدية '+d.ar+'</div>';
       pill.innerHTML=h; void pill.offsetWidth; pill.className=gChg?'chg-g':'chg-d';
-      try{ if(navigator.vibrate) navigator.vibrate(gChg?[60,40,60]:30); }catch(e){}
+      
       chgT=setTimeout(function(){ pill.className=''; },gChg?4500:3000);
     } else pill.innerHTML=h;
   }
