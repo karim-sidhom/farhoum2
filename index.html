@@ -4480,6 +4480,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     speak(tour?tour:'Street View. Je regarde le lieu.');
     describeHere(true,svPos,true,tour?{pre:pre}:false);
+    svAiRead(lat,lon,0);
   }
   var svLast=null;
   /* suivi : on se met à jour au plus toutes les 20 s, et seulement quand la lecture vocale précédente est finie */
@@ -4493,8 +4494,43 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+p.lat+','+p.lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+p.lat.toFixed(4)+', '+p.lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     describeHere(true,null,true);
+    svAiRead(p.lat,p.lon,0);
   }
   setInterval(svTick,2000);
+
+  /* ===== 👁️ Street View -> worker -> IA de description (type Be My Eyes) -> stockage partagé (Supabase 'svdesc') =====
+     Farhoum 2 relit la même entrée : pdbGet('svdesc', cle) avec cle = 'sv:'+(ar?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4) */
+  var SVDB_URL='https://dpmgtuhgwmnuhefwatbf.supabase.co/rest/v1/ala_store', SVDB_KEY='sb_publishable_cmj3m3go11BMP07E6SLUSw_Aw-c4R2U';
+  async function svdbGet(key){ try{ var r=await fetch(SVDB_URL+'?kind=eq.svdesc&key=eq.'+encodeURIComponent(key)+'&select=data&limit=1',{headers:{apikey:SVDB_KEY}}); if(!r.ok) return null; var j=await r.json(); return (j&&j[0]&&j[0].data)?j[0].data:null; }catch(e){ return null; } }
+  function svdbPut(key,data){ try{ fetch(SVDB_URL+'?on_conflict=kind,key',{method:'POST',headers:{apikey:SVDB_KEY,Authorization:'Bearer '+SVDB_KEY,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([{kind:'svdesc',key:key,data:data,updated_at:new Date().toISOString()}])}); }catch(e){} }
+  var SV_WORKER='';   /* URL du worker sv-describe (vide = désactivé) */
+  var svAiSeq=0, svAiMem={};
+  function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
+  function svAiShow(txt,fromCache){
+    var t=document.getElementById('svTxt');
+    if(t) t.textContent=(t.textContent||'')+'\n👁️ '+txt;
+    if(!window.svAiWarned){ window.svAiWarned=1; speakAdd(AR?'وصف تلقائي، تأكد منه.':'Description automatique, à confirmer.'); }
+    speakAdd(txt);
+    if(fromCache) say('👁️ (mémorisé) '+txt,15000);
+  }
+  async function svAiRead(lat,lon,heading){
+    var key=svAiKey(lat,lon), my=++svAiSeq;
+    try{
+      var txt=svAiMem[key];
+      if(!txt){ try{ txt=localStorage.getItem('svai:'+key); }catch(e){} }
+      if(!txt){ var d=await svdbGet(key); if(d&&d.txt) txt=d.txt; }
+      if(txt){ svAiMem[key]=txt; if(my===svAiSeq) svAiShow(txt,true); return; }
+      if(!SV_WORKER) return; /* pas de worker : on ne lit que ce qui est déjà stocké */
+      var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr',heading:heading||0})});
+      var j=await r.json();
+      if(!r.ok||!j.txt){ if(my===svAiSeq) say('👁️ '+(j&&j.error||'description indisponible'),5000); return; }
+      svAiMem[key]=j.txt;
+      try{ localStorage.setItem('svai:'+key,j.txt); }catch(e){}
+      svdbPut(key,{txt:j.txt,lat:lat,lon:lon,lang:AR?'ar':'fr',src:j.src||'',engine:j.engine||'',t:Date.now()});
+      if(my===svAiSeq) svAiShow(j.txt,false);
+    }catch(e){ try{ console.warn('svAiRead',e); }catch(x){} }
+  }
 
   /* ===== 🏘️ Tour du quartier : un curseur part de ma position GPS, fait une boucle rue par rue,
      s'arrête toutes les 20 s (au moins), ouvre Street View à cet endroit et lit la description, jusqu'au retour au départ ===== */
