@@ -4506,17 +4506,66 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   /* cherche la description la plus proche (<= 150 m) : les points stockés ne tombent jamais pile sur le clic */
   async function svdbNear(lat,lon){
     try{
-      var L=AR?'a':'f', ps=[-0.002,-0.001,0,0.001,0.002].map(function(d){ return 'key.like.sv:'+L+':'+(lat+d).toFixed(3)+'*'; });
-      var r=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+ps.join(',')+')&select=data&limit=300',{headers:{apikey:SVDB_KEY}});
-      if(!r.ok) return null; var rows=await r.json(), best=null, bd=1e9;
-      rows.forEach(function(x){ var d=x.data; if(!d||d.lat==null||d.txt==null) return;
-        var dy=(d.lat-lat)*111320, dx=(d.lon-lon)*111320*Math.cos(lat*Math.PI/180), m=Math.sqrt(dx*dx+dy*dy);
-        if(m<bd){ bd=m; best=d; } });
-      return (best&&bd<=150)?{d:best,m:bd}:null;
+      var L=AR?'a':'f', D=[-0.002,-0.001,0,0.001,0.002], DX=[-0.003,-0.002,-0.001,0,0.001,0.002,0.003];
+      function pick(rows){
+        var best=null, bd=1e9;
+        (rows||[]).forEach(function(x){ var d=x.data; if(!d||d.lat==null||d.txt==null) return;
+          var dy=(d.lat-lat)*111320, dx=(d.lon-lon)*111320*Math.cos(lat*Math.PI/180), m=Math.sqrt(dx*dx+dy*dy);
+          if(m<bd){ bd=m; best=d; } });
+        return (best&&bd<=150)?{d:best,m:bd}:null;
+      }
+      /* 1) recherche précise : latitude ET longitude */
+      try{
+        var ps=[]; D.forEach(function(dy){ DX.forEach(function(dx){ ps.push('key.like."sv:'+L+':'+(lat+dy).toFixed(3)+'*,'+(lon+dx).toFixed(3)+'*"'); }); });
+        var r1=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+encodeURIComponent(ps.join(','))+')&select=data&limit=1000',{headers:{apikey:SVDB_KEY}});
+        if(r1.ok){ var h1=pick(await r1.json()); if(h1) return h1; }
+      }catch(e){}
+      /* 2) repli : ancienne recherche par latitude seule (jamais pire qu'avant) */
+      var ps2=D.map(function(d){ return 'key.like.sv:'+L+':'+(lat+d).toFixed(3)+'*'; });
+      var r2=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+ps2.join(',')+')&select=data&limit=1000',{headers:{apikey:SVDB_KEY}});
+      if(!r2.ok) return null;
+      return pick(await r2.json());
     }catch(e){ return null; }
   }
+  /* toutes les descriptions à <=150 m, triées par distance (recherche précise lat+lon, repli latitude seule) */
+  async function svdbRows(lat,lon){
+    var L=AR?'a':'f', D=[-0.002,-0.001,0,0.001,0.002], DX=[-0.003,-0.002,-0.001,0,0.001,0.002,0.003];
+    function conv(rows){
+      var out=[];
+      (rows||[]).forEach(function(x){ var d=x&&x.data; if(!d||d.lat==null||d.lon==null||d.txt==null) return;
+        var dy=(d.lat-lat)*111320, dx=(d.lon-lon)*111320*Math.cos(lat*Math.PI/180), m=Math.sqrt(dx*dx+dy*dy);
+        if(m<=150) out.push({d:d,m:m,dx:dx,dy:dy}); });
+      out.sort(function(a,b){ return a.m-b.m; });
+      return out;
+    }
+    try{
+      var ps=[]; D.forEach(function(dy){ DX.forEach(function(dx){ ps.push('key.like."sv:'+L+':'+(lat+dy).toFixed(3)+'*,'+(lon+dx).toFixed(3)+'*"'); }); });
+      var r1=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+encodeURIComponent(ps.join(','))+')&select=data&limit=1000',{headers:{apikey:SVDB_KEY}});
+      if(r1.ok){ var a=conv(await r1.json()); if(a.length) return a; }
+    }catch(e){}
+    try{
+      var ps2=D.map(function(d){ return 'key.like.sv:'+L+':'+(lat+d).toFixed(3)+'*'; });
+      var r2=await fetch(SVDB_URL+'?kind=eq.svdesc&or=('+ps2.join(',')+')&select=data&limit=1000',{headers:{apikey:SVDB_KEY}});
+      if(!r2.ok) return [];
+      return conv(await r2.json());
+    }catch(e){ return []; }
+  }
+  /* côté d'un point par rapport à la vue Street View affichée (elle s'ouvre face au nord) */
+  function svSideOf(dx,dy){ var a=Math.atan2(dx,dy)*180/Math.PI; if(a<0) a+=360;
+    return (a>=315||a<45)?'devant':(a<135?'droite':(a<225?'derriere':'gauche')); }
+  /* description EXACTE (<=15 m) ; sinon la plus proche d'un côté ET la plus proche de l'autre côté */
+  async function svdbSides(lat,lon){
+    var rows=await svdbRows(lat,lon), out={exact:null,near:[]};
+    if(!rows.length) return out;
+    if(rows[0].m<=15){ out.exact=rows[0]; return out; }
+    var A=rows[0], B=null;
+    for(var i=1;i<rows.length;i++){ if(A.dx*rows[i].dx+A.dy*rows[i].dy<0){ B=rows[i]; break; } }
+    A.side=svSideOf(A.dx,A.dy); out.near.push(A);
+    if(B){ B.side=svSideOf(B.dx,B.dy); out.near.push(B); }
+    return out;
+  }
   var SV_WORKER='';   /* URL du worker sv-describe (vide = désactivé) */
-  var svAiSeq=0, svAiMem={};
+  var svAiSeq=0, svAiMem={}, svSideMem={};
   function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
   function svAiShow(txt,fromCache,m){
     var t=document.getElementById('svTxt');
@@ -4526,19 +4575,29 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     speakAdd(txt);
     if(fromCache) say('👁️ (mémorisé) '+txt,15000);
   }
+  var SV_SIDE_FR={devant:'Devant',droite:'À droite',gauche:'À gauche',derriere:'Derrière'}, SV_SIDE_AR={devant:'أمامك',droite:'على اليمين',gauche:'على اليسار',derriere:'خلفك'};
+  function svAiShowSides(list){
+    var t=document.getElementById('svTxt'), head=AR?'لا يوجد وصف في هذا المكان بالضبط.':'Pas de description exactement ici.';
+    if(t) t.textContent=(t.textContent||'')+'\n👁️ '+head;
+    if(!window.svAiWarned){ window.svAiWarned=1; speakAdd(AR?'وصف تلقائي، تأكد منه.':'Description automatique, à confirmer.'); }
+    speakAdd(head);
+    list.forEach(function(x){
+      var lab=(AR?SV_SIDE_AR:SV_SIDE_FR)[x.side]||'', n=Math.round(x.m);
+      var line=AR?(lab+' على بعد '+n+' متر: '+x.d.txt):(lab+', à '+n+' mètre'+(n>1?'s':'')+' : '+x.d.txt);
+      if(t) t.textContent=(t.textContent||'')+'\n👁️ '+line;
+      speakAdd(line);
+    });
+  }
   async function svAiRead(lat,lon,heading,after){
     var key=svAiKey(lat,lon), my=++svAiSeq;
     try{
-      var hit=svAiMem[key];
-      if(!hit){ var n=await svdbNear(lat,lon); if(n) hit=n; }
-      if(hit){ svAiMem[key]=hit;
+      var S=svSideMem[key];
+      if(!S){ S=await svdbSides(lat,lon); if(S&&(S.exact||S.near.length)) svSideMem[key]=S; }
+      if(S&&(S.exact||S.near.length)){
         if(after){ try{ await after; }catch(e){} }
-        if(my===svAiSeq){
-          if(hit.m>25){ try{ document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+hit.d.lat+','+hit.d.lon+'&cbp=12,0,0,0,0&output=svembed'; }catch(e){} }
-          svAiShow(hit.d.txt,true,hit.m);
-        }
+        if(my===svAiSeq){ if(S.exact) svAiShow(S.exact.d.txt,true,S.exact.m); else svAiShowSides(S.near); }
         return; }
-      if(!SV_WORKER){ if(my===svAiSeq) say('👁️ pas encore de description ici',4000); return; } /* pas de worker : on ne lit que ce qui est déjà stocké */
+      if(!SV_WORKER){ if(my===svAiSeq){ say('👁️ pas encore de description ici',4000); speakAdd(AR?'لا يوجد وصف لهذا المكان. كن حذرا.':'Pas de description ici. Restez prudent.'); } return; } /* pas de worker : on ne lit que ce qui est déjà stocké */
       var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr',heading:heading||0})});
       var j=await r.json();
