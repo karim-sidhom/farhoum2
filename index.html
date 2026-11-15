@@ -1050,8 +1050,16 @@ return {
 var map=L.map('map',{zoomControl:true}).setView([36.0,9.8],7);
 var street=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18});
 var sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'});
-sat.addTo(map); var satOn=true; /* الافتتاح دائماً بوضع القمر الصناعي */
-document.getElementById('sat').onclick=function(){ if(satOn){map.removeLayer(sat);street.addTo(map);}else{map.removeLayer(street);sat.addTo(map);} satOn=!satOn; };
+var satOn=true; /* الافتتاح دائماً بوضع القمر الصناعي */
+/* noms des villes par-dessus l’image satellite (comme Google Maps) ; si le service Esri ne répond pas, bascule automatique sur les noms CARTO / OpenStreetMap */
+var satLbl=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,zIndex:500,attribution:'Esri'});
+(function(){ var bad=0, good=0, swapped=false;
+  satLbl.on('tileload',function(){ good++; });
+  satLbl.on('tileerror',function(){ bad++; if(!swapped&&good===0&&bad>=4){ swapped=true; try{ var on=map.hasLayer(satLbl); map.removeLayer(satLbl);
+    satLbl=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}.png',{subdomains:'abcd',maxZoom:19,zIndex:500,attribution:'© OpenStreetMap © CARTO'}); if(on&&satOn) satLbl.addTo(map); }catch(e){} } });
+})();
+sat.addTo(map); satLbl.addTo(map);
+document.getElementById('sat').onclick=function(){ if(satOn){map.removeLayer(sat);map.removeLayer(satLbl);street.addTo(map);}else{map.removeLayer(street);sat.addTo(map);satLbl.addTo(map);} satOn=!satOn; };
 QT.RAIL_LINES.forEach(function(l){ L.polyline(l.pts,{color:'#1a1a1a',weight:6,opacity:.95,lineCap:'butt'}).addTo(map); L.polyline(l.pts,{color:'#ffffff',weight:3,opacity:1,dashArray:'9 9',lineCap:'butt'}).addTo(map); });
 var accLayer=L.layerGroup().addTo(map), userCircles={}, layer=L.layerGroup().addTo(map), trainLayer=L.layerGroup().addTo(map), riskLayer=L.layerGroup().addTo(map), fitted=false, lastUsers=[], lastTrainPts=[], usersMap={}, userMarkers={}, MAX_LIVE=2000, rtOpen=false;
 /* ===== مسارات السكة من OSM (Overpass) لكامل تونس، مع تخزين محلي أسبوعاً — نفس مصدر Qitari لكن للبلاد كلها ===== */
@@ -4384,24 +4392,27 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   }
   /* ===== marqueurs des ministères sur la carte : toucher un marqueur dit le nom et la distance (si le guidage vocal est actif) ===== */
   function minName(x){ var t=x.de; if(/^(du|de) /.test(t)) t=t.slice(3); return t.charAt(0).toUpperCase()+t.slice(1); }
-  var minLayer=null;
+  var minLayer=null, minMk=[];
+  function minNames(g){ return g.L.map(function(x){ return AR?x.ar:minName(x); }); }
+  function svMinRefresh(){ minMk.forEach(function(o){ try{ var el=o.mk.getElement&&o.mk.getElement(); if(el) el.title=minNames(o.g).join(AR?' و ':' ; '); }catch(e){} }); }
   try{
     minLayer=L.layerGroup().addTo(map);
     var minG={};   /* plusieurs lieux au même point (ex. Présidence + Finances) = un seul marqueur */
     MINISTERES.forEach(function(x){ var k=x.lat+','+x.lon; (minG[k]=minG[k]||{lat:x.lat,lon:x.lon,L:[]}).L.push(x); });
     Object.keys(minG).forEach(function(k){
-      var g=minG[k], names=g.L.map(function(x){ return AR?x.ar:minName(x); }), all=names.join(AR?' و ':' ; ');
+      var g=minG[k];
       var mk=L.marker([g.lat,g.lon],{
         icon:L.divIcon({className:'',html:'<div style="font-size:18px;line-height:24px;text-align:center;width:28px;height:28px;border-radius:50%;background:#fff;border:2px solid #0d1a6e;box-shadow:0 1px 4px rgba(0,0,0,.5)">🏛️</div>',iconSize:[28,28],iconAnchor:[14,14]}),
-        zIndexOffset:200, title:all
+        zIndexOffset:200, title:minNames(g).join(AR?' و ':' ; ')
       }).addTo(minLayer);
-      mk.bindPopup('🏛️ '+names.join('<br>🏛️ '));
+      mk.bindPopup(function(){ return '🏛️ '+minNames(g).join('<br>🏛️ '); });
       mk.on('click',function(){
-        var t=all;
+        var t=minNames(g).join(AR?' و ':' ; ');
         try{ if(meLast){ var dy=(g.lat-meLast.lat)*111320, dx=(g.lon-meLast.lon)*111320*Math.cos(meLast.lat*Math.PI/180), d=Math.sqrt(dx*dx+dy*dy);
           t+=AR?(' — على بعد '+Math.round(d)+' متر'):(' — à '+fmtM(d)); } }catch(e){}
         try{ if(guideOn) speak(t); }catch(e){}
       });
+      minMk.push({mk:mk,g:g});
     });
   }catch(e){ try{ console.warn('ministères',e); }catch(x){} }
   async function describeHere(force,pos,quiet,tour){
@@ -4636,6 +4647,51 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(B){ B.side=svSideOf(B.dx,B.dy); out.near.push(B); }
     return out;
   }
+  /* ===== carte : points où une description Street View existe déjà (vert) ; les nouveaux s\u2019ajoutent seuls toutes les 20 s (orange) ===== */
+  var SVD_MAX=50000, SVD_EVERY=20000;
+  var svdLayer=null, svdR=null, svdPts={}, svdN=0, svdLast='', svdBusy=false;
+  function svdAdd(key,isNew){
+    var m=/^sv:[fa]:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(key||''); if(!m) return false;
+    var k=m[1]+','+m[2]; if(svdPts[k]||svdN>=SVD_MAX) return false;
+    var la=parseFloat(m[1]), lo=parseFloat(m[2]); if(!isFinite(la)||!isFinite(lo)) return false;
+    var c=L.circleMarker([la,lo],{renderer:svdR,radius:isNew?6:4,color:isNew?'#e65100':'#003300',weight:1,fillColor:isNew?'#ffd600':'#00e676',fillOpacity:.9}).addTo(svdLayer);
+    c.on('click',function(){
+      var box=document.createElement('div'); box.style.maxWidth='240px'; box.textContent='…';
+      L.popup().setLatLng(c.getLatLng()).setContent(box).openOn(map);
+      Promise.resolve(svdbGet(key)).then(function(d){ box.textContent=(d&&d.txt)?d.txt:'(description introuvable)'; }).catch(function(){ box.textContent='(description introuvable)'; });
+    });
+    svdPts[k]=1; svdN++; return true;
+  }
+  async function svdPage(q){
+    var r=await fetch(SVDB_URL+'?kind=eq.svdesc&select=key,updated_at&'+q,{headers:{apikey:SVDB_KEY}});
+    if(!r.ok) return null; return await r.json();
+  }
+  async function svdLoadAll(){
+    var off=0;
+    for(;;){
+      var rows=await svdPage('order=key.asc&limit=1000&offset='+off); if(!rows) break;
+      rows.forEach(function(x){ svdAdd(x.key,false); if(x.updated_at&&x.updated_at>svdLast) svdLast=x.updated_at; });
+      if(rows.length<1000||svdN>=SVD_MAX) break; off+=1000;
+    }
+  }
+  async function svdPoll(){
+    if(svdBusy||document.hidden) return; svdBusy=true;
+    try{
+      var added=0, guard=0, fresh=!!svdLast;
+      for(;;){
+        var rows=await svdPage('updated_at=gt.'+encodeURIComponent(svdLast||'1970-01-01T00:00:00+00:00')+'&order=updated_at.asc&limit=1000');
+        if(!rows||!rows.length) break;
+        rows.forEach(function(x){ if(svdAdd(x.key,fresh)) added++; if(x.updated_at&&x.updated_at>svdLast) svdLast=x.updated_at; });
+        if(rows.length<1000||++guard>20) break;
+      }
+      if(added&&fresh) say(AR?('🆕 '+added+' وصف جديد'):('🆕 '+added+' nouvelle'+(added>1?'s':'')+' description'+(added>1?'s':'')),3000);
+    }catch(e){}
+    svdBusy=false;
+  }
+  try{
+    svdLayer=L.layerGroup().addTo(map); svdR=L.canvas({padding:.5});
+    svdLoadAll().then(function(){ if(svdN) say('🗺️ '+svdN+(AR?' نقطة بوصف':' points avec description'),3500); }).catch(function(){}).then(function(){ setInterval(svdPoll,SVD_EVERY); });
+  }catch(e){ try{ console.warn('points descriptions',e); }catch(x){} }
   var SV_WORKER='';   /* URL du worker sv-describe (vide = désactivé) */
   var svAiSeq=0, svAiMem={}, svSideMem={};
   function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
@@ -5011,6 +5067,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       try{ localStorage.setItem('lang_ar',AR?'1':'0'); }catch(e){}
       try{ speechSynthesis.cancel(); }catch(e){}
       descCache={}; cityDone='';
+      try{ if(typeof svMinRefresh==='function') svMinRefresh(); }catch(e){}
       lBtn.textContent=AR?'FR':'ع';
       var msg=AR?'تم تفعيل اللغة العربية':'Français activé';
       say('🌐 '+msg,2500); speak(msg);
