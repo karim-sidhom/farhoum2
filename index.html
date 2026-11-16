@@ -4398,6 +4398,104 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   }
   /* ===== marqueurs des ministères sur la carte : toucher un marqueur dit le nom et la distance (si le guidage vocal est actif) ===== */
   function minName(x){ var t=x.de; if(/^(du|de) /.test(t)) t=t.slice(3); return t.charAt(0).toUpperCase()+t.slice(1); }
+
+  /* ===== Fiche du ministère : texte de présentation + lecture vocale (l'essentiel, ou tout) ===== */
+  (function(){
+    var st=document.createElement('style');
+    st.textContent='#minInfo{position:fixed;left:8px;right:8px;bottom:calc(8px + env(safe-area-inset-bottom));z-index:2600;display:none;flex-direction:column;max-height:62vh;background:linear-gradient(160deg,#0d1a6e,#020b2e);color:#fff;border:1px solid #d4af37;border-radius:16px;box-shadow:0 8px 28px rgba(0,0,0,.55);overflow:hidden;max-width:640px;margin:0 auto}'
+    +'#minInfo .mh{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #ffffff22}'
+    +'#minInfo .mt{flex:1;font-weight:700;color:#d4af37;font-size:15px;line-height:1.3}'
+    +'#minInfo .mx{background:transparent;color:#fff;border:0;font-size:20px;cursor:pointer;opacity:.8}'
+    +'#minInfo .mb{overflow:auto;padding:10px 12px;font-size:14px;line-height:1.6;-webkit-overflow-scrolling:touch}'
+    +'#minInfo .mb img{float:inline-start;max-width:34%;max-height:110px;object-fit:cover;border-radius:8px;margin:0 0 6px 10px;border:1px solid #d4af37}'
+    +'#minInfo .mb p{margin:0 0 8px;white-space:pre-wrap}'
+    +'#minInfo .mc{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px}'
+    +'#minInfo .mc button,#minInfo .ma button{background:#d4af37;color:#0d1a6e;border:0;border-radius:8px;padding:6px 12px;font-weight:700;cursor:pointer;font-size:13px}'
+    +'#minInfo .mc button.off{background:#ffffff22;color:#fff}'
+    +'#minInfo .ma{display:flex;gap:8px;flex-wrap:wrap;padding:8px 12px;border-top:1px solid #ffffff22}';
+    document.head.appendChild(st);
+    var box=document.createElement('div'); box.id='minInfo';
+    box.innerHTML='<div class="mh"><div class="mt"></div><button class="mx" aria-label="Fermer">✕</button></div><div class="mc"></div><div class="mb"></div><div class="ma"></div>';
+    document.body.appendChild(box);
+    var elT=box.querySelector('.mt'), elC=box.querySelector('.mc'), elB=box.querySelector('.mb'), elA=box.querySelector('.ma');
+    var tok=0, cache={}, cur=null;
+    function T(fr,ar){ return AR?ar:fr; }
+    function stopTalk(){ try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){} }
+    function clean(s){
+      return String(s||'').replace(/\[\d+\]/g,'').replace(/^=+\s*(.*?)\s*=+$/gm,'$1').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+    }
+    function sentences(s){ return (String(s).replace(/\s*\n+\s*/g,' ').match(/[^.!?؟]+[.!?؟]+(\s|$)|[^.!?؟]+$/g)||[]).map(function(x){ return x.trim(); }).filter(Boolean); }
+    function essential(intro){
+      var s=String(intro||'').replace(/\([^)]*\)/g,'').replace(/\s{2,}/g,' ');
+      var L=sentences(s), out='';
+      for(var i=0;i<L.length&&i<3;i++){ if(out&&(out+' '+L[i]).length>420) break; out=out?out+' '+L[i]:L[i]; }
+      if(out.length>480) out=out.slice(0,480).replace(/\s\S*$/,'')+'.';
+      return out;
+    }
+    function talk(text){
+      stopTalk();
+      if(!window.speechSynthesis||!text) return;
+      var tx=clean(text); if(AR){ try{ tx=toAr(tx); }catch(e){} }
+      var parts=[]; sentences(tx).forEach(function(sn){ while(sn.length>220){ var k=sn.lastIndexOf(' ',220); if(k<60) k=220; parts.push(sn.slice(0,k)); sn=sn.slice(k).trim(); } if(sn) parts.push(sn); });
+      parts.forEach(function(sn){ var u=new SpeechSynthesisUtterance(sn); u.lang=ME_SAY_LANG; u.rate=.95; u.volume=1; window.speechSynthesis.speak(u); });
+    }
+    function api(q){ return 'https://'+(AR?'ar':'fr')+'.wikipedia.org/w/api.php?format=json&origin=*&redirects=1&'+q; }
+    function firstPage(j){ var P=(j&&j.query&&j.query.pages)||{}, k=Object.keys(P)[0]; return k?P[k]:null; }
+    function load(x){
+      var name=AR?x.ar:minName(x), key=(AR?'a:':'f:')+name;
+      if(cache[key]) return Promise.resolve(cache[key]);
+      var q=AR?(x.ar+' تونس'):(name+' Tunisie');
+      return jget(api('action=query&list=search&srlimit=1&srsearch='+encodeURIComponent(q)),10000).then(function(j){
+        var h=j&&j.query&&j.query.search&&j.query.search[0]; if(!h) return null;
+        return jget(api('action=query&prop=extracts|pageimages&exintro=1&explaintext=1&piprop=thumbnail&pithumbsize=400&titles='+encodeURIComponent(h.title)),10000).then(function(j2){
+          var pg=firstPage(j2); if(!pg||!pg.extract) return null;
+          var r={title:h.title,intro:clean(pg.extract),img:(pg.thumbnail&&pg.thumbnail.source)||'',full:null};
+          cache[key]=r; return r;
+        });
+      });
+    }
+    function loadFull(r){
+      if(r.full!==null) return Promise.resolve(r.full);
+      return jget(api('action=query&prop=extracts&explaintext=1&exsectionformat=plain&titles='+encodeURIComponent(r.title)),15000).then(function(j){
+        var pg=firstPage(j); r.full=clean(pg&&pg.extract||r.intro); return r.full;
+      });
+    }
+    function show(x,autoRead){
+      var my=++tok; cur=x; stopTalk();
+      var name=AR?x.ar:minName(x);
+      elT.textContent='🏛️ '+name; elB.innerHTML=''; elA.innerHTML='';
+      var p0=document.createElement('p'); p0.textContent=T('Chargement…','جارٍ التحميل…'); elB.appendChild(p0);
+      load(x).then(function(r){
+        if(my!==tok) return;
+        elB.innerHTML='';
+        if(!r){ var pe=document.createElement('p'); pe.textContent=T('Aucune présentation disponible pour ce ministère.','لا يوجد تعريف متاح لهذه الوزارة.'); elB.appendChild(pe); return; }
+        var ess=essential(r.intro);
+        if(r.img){ var im=document.createElement('img'); im.src=r.img; im.alt=''; elB.appendChild(im); }
+        var pp=document.createElement('p'); pp.textContent=r.intro; elB.appendChild(pp);
+        var bE=document.createElement('button'); bE.textContent=T('🔊 Lire l’essentiel','🔊 قراءة الخلاصة'); bE.onclick=function(){ talk(ess); };
+        var bA=document.createElement('button'); bA.textContent=T('📖 Tout lire','📖 قراءة الكل');
+        bA.onclick=function(){
+          bA.disabled=true; var old=bA.textContent; bA.textContent='…';
+          loadFull(r).then(function(full){ if(my!==tok) return; elB.innerHTML=''; var pf=document.createElement('p'); pf.textContent=full; elB.appendChild(pf); elB.scrollTop=0; talk(full); bA.disabled=false; bA.textContent=old; },function(){ bA.disabled=false; bA.textContent=old; talk(r.intro); });
+        };
+        var bS=document.createElement('button'); bS.textContent=T('⏹ Stop','⏹ إيقاف'); bS.className='off'; bS.onclick=stopTalk;
+        elA.appendChild(bE); elA.appendChild(bA); elA.appendChild(bS);
+        if(autoRead&&ess){ try{ if(window.speechSynthesis){ var tx=ess; if(AR){ try{ tx=toAr(tx); }catch(e){} } sentences(tx).forEach(function(sn){ var u=new SpeechSynthesisUtterance(sn); u.lang=ME_SAY_LANG; u.rate=.95; u.volume=1; window.speechSynthesis.speak(u); }); } }catch(e){} }
+      },function(){
+        if(my!==tok) return;
+        elB.innerHTML=''; var pe=document.createElement('p'); pe.textContent=T('Impossible de charger la présentation. Vérifie ta connexion Internet.','تعذّر تحميل التعريف. تحقّق من اتصالك بالإنترنت.'); elB.appendChild(pe);
+      });
+    }
+    function close(){ tok++; stopTalk(); box.style.display='none'; }
+    box.querySelector('.mx').onclick=close;
+    window.minInfoOpen=function(g,autoRead){
+      box.dir=AR?'rtl':'ltr'; box.style.display='flex'; elC.innerHTML='';
+      if(g.L.length>1){
+        g.L.forEach(function(x,i){ var b=document.createElement('button'); b.textContent=AR?x.ar:minName(x); b.className=i?'off':''; b.onclick=function(){ Array.prototype.forEach.call(elC.children,function(c){ c.className='off'; }); b.className=''; show(x,true); }; elC.appendChild(b); });
+      }
+      show(g.L[0],autoRead);
+    };
+  })();
   var minLayer=null, minMk=[];
   function minNames(g){ return g.L.map(function(x){ return AR?x.ar:minName(x); }); }
   function svMinRefresh(){ minMk.forEach(function(o){ try{ var el=o.mk.getElement&&o.mk.getElement(); if(el) el.title=minNames(o.g).join(AR?' و ':' ; '); }catch(e){} }); }
@@ -4411,12 +4509,12 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
         icon:L.divIcon({className:'',html:'<div style="font-size:18px;line-height:24px;text-align:center;width:28px;height:28px;border-radius:50%;background:#fff;border:2px solid #0d1a6e;box-shadow:0 1px 4px rgba(0,0,0,.5)">🏛️</div>',iconSize:[28,28],iconAnchor:[14,14]}),
         zIndexOffset:200, title:minNames(g).join(AR?' و ':' ; ')
       }).addTo(minLayer);
-      mk.bindPopup(function(){ return '🏛️ '+minNames(g).join('<br>🏛️ '); });
       mk.on('click',function(){
         var t=minNames(g).join(AR?' و ':' ; ');
         try{ if(meLast){ var dy=(g.lat-meLast.lat)*111320, dx=(g.lon-meLast.lon)*111320*Math.cos(meLast.lat*Math.PI/180), d=Math.sqrt(dx*dx+dy*dy);
           t+=AR?(' — على بعد '+Math.round(d)+' متر'):(' — à '+fmtM(d)); } }catch(e){}
         try{ if(guideOn) speak(t); }catch(e){}
+        try{ minInfoOpen(g,guideOn); }catch(e){ try{ console.warn('minInfo',e); }catch(x){} }
       });
       minMk.push({mk:mk,g:g});
     });
