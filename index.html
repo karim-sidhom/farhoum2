@@ -4376,7 +4376,12 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     {de:'du ministère du Tourisme',ar:'وزارة السياحة',lat:36.8075,lon:10.1850},
     {de:'du ministère des Affaires religieuses',ar:'وزارة الشؤون الدينية',lat:36.7955,lon:10.1640},
     {de:'du ministère de la Famille, de la Femme, de l\u2019Enfance et des Seniors',ar:'وزارة الأسرة والمرأة والطفولة وكبار السن',lat:36.8088,lon:10.1610},
-    {de:'du ministère des Affaires culturelles',ar:'وزارة الشؤون الثقافية',lat:36.7970,lon:10.1660}
+    {de:'du ministère des Affaires culturelles',ar:'وزارة الشؤون الثقافية',lat:36.7970,lon:10.1660},
+    {de:'de l\u2019Union nationale des aveugles de Tunisie (UNAT)',nm:'Union nationale des aveugles de Tunisie (UNAT)',ar:'الإتحاد الوطني للمكفوفين بالجمهورية التونسية',ic:'🦯',text:'L\u2019UNAT en Tunisie désigne principalement l\u2019Union nationale des aveugles de Tunisie, qui est la plus ancienne association tunisienne dédiée à la promotion sociale, professionnelle et culturelle des personnes aveugles et non-voyantes, fondée le 25 juillet 1956. Elle dispose de plusieurs structures affiliées, comme l\u2019école de Bir El Kassaâ ou l\u2019Institut secondaire des non-voyants à Sousse.',textAr:'منظمة وطنية اجتماعية عريقة تأسست سنة ألف و تسعمائة و ستة و خمسين، و هي جمعية ذات مصلحة قومية تعمل تحت إشراف وزارة الشؤون الاجتماعية. يعدّ الاتحاد الوطني للمكفوفين الشريك التاريخي و الرائد في النهوض بالأشخاص ذوي الإعاقة البصرية في تونس، من خلال شبكة واسعة تضم أربعاً و عشرين اتحاداً جهوياً تغطي كافة تراب الجمهورية. تلتزم المنظمة بتقديم خدمات شاملة تشمل التعليم المتخصص، و التدريب المهني، و التمكين الاقتصادي، مع تخصصها الفريد في نشر ثقافة البرايل و توفير الموارد التعليمية و التقنية الحديثة. نحن نعمل برؤية طموحة تهدف إلى تعزيز الإدماج الشامل لفاقدي البصر في المجتمع، و ضمان استقلاليتهم و حقوقهم الدستورية في كافة مجالات الحياة، مواكبين بذلك أحدث المعايير الدولية و الابتكارات الرقمية لخدمة أبناء الاتحاد.',lat:36.802789,lon:10.165120},
+    {de:'du siège central de l\u2019UNAT',nm:'UNAT — Siège central, Tunis',ar:'الاتحاد الوطني للمكفوفين — المقر المركزي بتونس',ic:'🦯',text:'Siège central de l\u2019Union nationale des aveugles de Tunisie, au 5 rue Bab El Allouj, à Tunis.',textAr:'المقر المركزي للاتحاد الوطني للمكفوفين بالجمهورية التونسية، 5 نهج باب العلوج، تونس.',lat:36.8023,lon:10.1691},
+    {de:'de l\u2019UNAT de Ben Arous',nm:'UNAT — Ben Arous (Institut Ennour)',ar:'الفرع الجهوي ببن عروس — معهد النور للمكفوفين',ic:'🦯',text:'Branche régionale de Ben Arous de l\u2019Union nationale des aveugles de Tunisie : l\u2019Institut Ennour pour les aveugles, à Bir El Kassaâ.',textAr:'الفرع الجهوي ببن عروس للاتحاد الوطني للمكفوفين: معهد النور للمكفوفين، بئر القصعة.',lat:36.7458,lon:10.2312},
+    {de:'de l\u2019UNAT de Nabeul',nm:'UNAT — Nabeul',ar:'الفرع الجهوي بنابل',ic:'🦯',text:'Branche régionale de Nabeul de l\u2019Union nationale des aveugles de Tunisie, au 11 avenue Mongi Bali, à Nabeul.',textAr:'الفرع الجهوي بنابل للاتحاد الوطني للمكفوفين، 11 شارع منجي بالي، نابل.',lat:36.4512,lon:10.7389},
+    {de:'de l\u2019UNAT de Sousse',nm:'UNAT — Sousse (Institut des aveugles)',ar:'الفرع الجهوي بسوسة — معهد المكفوفين',ic:'🦯',text:'Branche régionale de Sousse de l\u2019Union nationale des aveugles de Tunisie : l\u2019Institut des aveugles de Sousse.',textAr:'الفرع الجهوي بسوسة للاتحاد الوطني للمكفوفين: معهد المكفوفين، سوسة.',lat:35.8251,lon:10.6368}
   ];
   var minLastKey='';
   /* phrase à dire si je suis (ou si le lieu décrit est) à moins de MIN_R m d\u2019un ministère ; '' sinon.
@@ -4397,7 +4402,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     }).join(' ');
   }
   /* ===== marqueurs des ministères sur la carte : toucher un marqueur dit le nom et la distance (si le guidage vocal est actif) ===== */
-  function minName(x){ var t=x.de; if(/^(du|de) /.test(t)) t=t.slice(3); return t.charAt(0).toUpperCase()+t.slice(1); }
+  function minName(x){ if(x.nm) return x.nm; var t=x.de; if(/^(du|de) /.test(t)) t=t.slice(3); return t.charAt(0).toUpperCase()+t.slice(1); }
 
   /* ===== Fiche du ministère : texte de présentation + lecture vocale (l'essentiel, ou tout) ===== */
   (function(){
@@ -4443,6 +4448,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     function firstPage(j){ var P=(j&&j.query&&j.query.pages)||{}, k=Object.keys(P)[0]; return k?P[k]:null; }
     function load(x){
       var name=AR?x.ar:minName(x), key=(AR?'a:':'f:')+name;
+      if(x.text){ var lt=(AR&&x.textAr)?x.textAr:x.text; return Promise.resolve({title:name,intro:lt,img:'',full:lt}); }
       if(cache[key]) return Promise.resolve(cache[key]);
       var q=AR?(x.ar+' تونس'):(name+' Tunisie');
       return jget(api('action=query&list=search&srlimit=1&srsearch='+encodeURIComponent(q)),10000).then(function(j){
@@ -4506,7 +4512,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     Object.keys(minG).forEach(function(k){
       var g=minG[k];
       var mk=L.marker([g.lat,g.lon],{
-        icon:L.divIcon({className:'',html:'<div style="font-size:18px;line-height:24px;text-align:center;width:28px;height:28px;border-radius:50%;background:#fff;border:2px solid #0d1a6e;box-shadow:0 1px 4px rgba(0,0,0,.5)">🏛️</div>',iconSize:[28,28],iconAnchor:[14,14]}),
+        icon:L.divIcon({className:'',html:'<div style="font-size:18px;line-height:24px;text-align:center;width:28px;height:28px;border-radius:50%;background:#fff;border:2px solid #0d1a6e;box-shadow:0 1px 4px rgba(0,0,0,.5)">'+(g.L[0].ic||'🏛️')+'</div>',iconSize:[28,28],iconAnchor:[14,14]}),
         zIndexOffset:200, title:minNames(g).join(AR?' و ':' ; ')
       }).addTo(minLayer);
       mk.on('click',function(){
