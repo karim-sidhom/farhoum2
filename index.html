@@ -3743,6 +3743,11 @@ if('serviceWorker' in navigator){
     /* services */
     P(/À proximité : /g,'بالقرب منك: ');
     P(/Dans ce quartier/g,'في هذا الحي');
+    /* services : chemin pour y aller */
+    P(/Voici les services les plus proches, avec le chemin pour y aller\./g,'هذه أقرب الخدمات مع طريق الوصول إليها.');
+    P(/Depuis ta position : /g,'من موقعك: ');
+    P(new RegExp('Je n'+A+'ai trouvé aucune? ([^.]+?) à moins de (\\d+) mètres\\.','g'),'لم أجد أي $1 في نطاق $2 متراً.');
+    P(new RegExp('([^.]+?) se situe (?:au |à l'+A+')'+AR_DRE+' de toi\\.','g'),function(m,n,d){ return n.trim()+' يقع في '+AR_DIR[d]+' منك.'; });
     /* guidage, lieux, trains */
     P(/Tu es ici/g,'أنت هنا');
     P(/Position pas encore trouvée/g,'لم يتم تحديد موقعك بعد');
@@ -5020,7 +5025,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function tourIcon(){ return L.divIcon({className:'',html:'<div style="width:34px;height:34px;border-radius:50%;background:#ff9800;border:3px solid #fff;box-shadow:0 0 0 4px rgba(255,152,0,.45);display:flex;align-items:center;justify-content:center;font-size:18px">👆</div>',iconSize:[34,34],iconAnchor:[17,17]}); }
   function tourClear(){
     if(!tour) return;
-    try{ if(tour.mk) map.removeLayer(tour.mk); if(tour.pl) map.removeLayer(tour.pl); }catch(e){}
+    try{ if(tour.mk) map.removeLayer(tour.mk); if(tour.pl) map.removeLayer(tour.pl); if(tour.svL) map.removeLayer(tour.svL); }catch(e){}
     clearInterval(tourIv); tourIv=null; tour=null;
     try{ tBtn.style.opacity='1'; tBtn.textContent='🏘️'; kBtn.style.display='none'; }catch(e){}
   }
@@ -5105,9 +5110,9 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!meLast) return '';
     var la=meLast.lat, lo=meLast.lon, d=dHav(la,lo,q[0],q[1]);
     if(st&&st.last) return 'Retour à ton point de départ.';
-    if(st&&!st.nm){ var sv0=''; try{ sv0=tourSvcText(q); }catch(e){} return 'Je ne la situe pas, son nom n\u2019est pas connu. '+sv0; }
+    if(st&&!st.nm){ var sv0=''; try{ sv0=await tourSvcTextGo(q); }catch(e){} return 'Je ne la situe pas, son nom n\u2019est pas connu. '+sv0; }
     var thing=(st&&st.nm)?'Cette rue':'Cet endroit';
-    if(d<20) return thing+' est tout près de toi. '+(function(){ try{ return tourSvcText(q); }catch(e){ return ''; } })();
+    if(d<20) return thing+' est tout près de toi. '+(await tourSvcTextGo(q).catch(function(){ return ''; }));
     var card=D_CARD[Math.round(dBearing(la,lo,q[0],q[1])/45)%8];
     var out=thing+' se situe '+((card==='est'||card==='ouest')?'à l\u2019':'au ')+card+' de toi. À vol d\u2019oiseau, '+fmtM(d)+'.';
     var c=lo+','+la+';'+q[1]+','+q[0];
@@ -5122,8 +5127,70 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     }
     out+=' '+leg(rs[0],8.3,'En voiture')+' '+leg(rs[1],1.25,'À pied');
     try{ var fr=rs[1].status==='fulfilled'&&rs[1].value&&rs[1].value.routes&&rs[1].value.routes[0]; var dr=fr?tourDirs(fr):''; if(dr) out+=' '+dr; }catch(e){}
-    try{ var sv=tourSvcText(q); if(sv) out+=' '+sv; }catch(e){}
+    try{ var sv=await tourSvcTextGo(q); if(sv) out+=' '+sv; }catch(e){}
     return out;
+  }
+  /* ===== services du quartier avec le chemin pour y aller (depuis ta position GPS) ===== */
+  var TOUR_ICO={pharmacy:'💊',mosque:'🕌',hospital:'🏥',clinic:'🏥',doctors:'🩺',dentist:'🦷',atm:'🏧',bank:'💳',fuel:'⛽',post:'📮',police:'👮',supermarket:'🛒',bakery:'🥖',school:'🏫',cafe:'☕',restaurant:'🍽️'};
+  var TOUR_BRIEF=['pharmacy','mosque','hospital','atm','bank','fuel','post','supermarket'], TOUR_BRIEF_N=6, TOUR_POI_R=550;
+  function tourPName(x){
+    var l=TOUR_PLBL[x.t][0], n=(AR&&x.a)?x.a:x.n;
+    var t=(n&&dNorm(n).indexOf(dNorm(l).split(' ')[0])>-1)?n:(l+(n?' '+n:''));
+    return t.charAt(0).toUpperCase()+t.slice(1);
+  }
+  async function tourGoText(x){
+    if(!meLast) return '';
+    var la=meLast.lat, lo=meLast.lon, d=dHav(la,lo,x.la,x.lo), nm=tourPName(x);
+    if(d<25) return nm+'. Tout près de toi, à '+fmtM(d)+'.';
+    var card=D_CARD[Math.round(dBearing(la,lo,x.la,x.lo)/45)%8];
+    var out=nm+' se situe '+((card==='est'||card==='ouest')?'à l\u2019':'au ')+card+' de toi.', rt=null;
+    try{
+      var j=await jget('https://routing.openstreetmap.de/routed-foot/route/v1/foot/'+lo+','+la+';'+x.lo+','+x.la+'?overview=false&steps=true',6000);
+      rt=j&&j.routes&&j.routes[0];
+    }catch(e){}
+    if(rt){
+      out+=' À pied, '+fmtM(rt.distance)+', environ '+tourMin(rt.duration)+'.';
+      var dr=''; try{ dr=tourDirs(rt); }catch(e){}
+      if(dr) out+=' '+dr;
+    } else {
+      var dist=d*1.3;
+      out+=' À vol d\u2019oiseau, '+fmtM(d)+'. À pied, environ '+fmtM(dist)+', environ '+tourMin(dist/1.25)+' (estimation).';
+    }
+    return out;
+  }
+  /* au départ du tour : le plus proche de chaque type (pharmacie, mosquée, hôpital, DAB…) + comment y aller */
+  async function tourSvcBrief(tk){
+    var pois=tk.pois||[]; if(!meLast) return '';
+    var la=meLast.lat, lo=meLast.lon, best={};
+    pois.forEach(function(x){ var d=dHav(la,lo,x.la,x.lo); if(!best[x.t]||d<best[x.t].d) best[x.t]={x:x,d:d}; });
+    var types=TOUR_BRIEF.filter(function(k){ return best[k]; }).slice(0,TOUR_BRIEF_N);
+    var miss=['pharmacy','mosque'].filter(function(k){ return !best[k]; }).map(function(k){ return 'Je n\u2019ai trouvé aucune '+TOUR_PLBL[k][0]+' à moins de '+TOUR_POI_R+' mètres.'; });
+    if(!types.length) return miss.join(' ');
+    var parts=await Promise.all(types.map(function(k){ return tourGoText(best[k].x).catch(function(){ return ''; }); }));
+    if(tour!==tk) return '';
+    types.forEach(function(k){ tk.said[best[k].x.id]=1; });
+    try{
+      if(!tk.svL) tk.svL=L.layerGroup().addTo(map);
+      types.forEach(function(k){
+        var x=best[k].x, nm=tourPName(x);
+        L.marker([x.la,x.lo],{zIndexOffset:120000,icon:L.divIcon({className:'',iconSize:[32,32],iconAnchor:[16,16],
+          html:'<div style="width:32px;height:32px;border-radius:50%;background:#fff;border:3px solid #ff9800;display:flex;align-items:center;justify-content:center;font-size:17px">'+(TOUR_ICO[k]||'📍')+'</div>'})})
+          .bindPopup('<b>'+esc(nm)+'</b><br>📍 '+fmtM(best[k].d)+'<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination='+x.la+','+x.lo+'&travelmode=walking">🧭 Y aller / كيف أصل</a>')
+          .addTo(tk.svL);
+      });
+    }catch(e){}
+    return 'Voici les services les plus proches, avec le chemin pour y aller. '+parts.filter(Boolean).join(' ')+(miss.length?' '+miss.join(' '):'');
+  }
+  /* pendant le tour : services croisés + chemin pour y aller depuis ta position */
+  async function tourSvcTextGo(q){
+    if(!tour||!tour.pois||!tour.pois.length) return '';
+    var near=[];
+    tour.pois.forEach(function(x){ if(tour.said[x.id]) return; var d=dHav(q[0],q[1],x.la,x.lo); if(d<=120) near.push({x:x,d:d}); });
+    near.sort(function(a,b){ return (TOUR_PORD.indexOf(a.x.t)-TOUR_PORD.indexOf(b.x.t))||(a.d-b.d); });
+    near=near.slice(0,3); if(!near.length) return '';
+    near.forEach(function(o){ tour.said[o.x.id]=1; });
+    var parts=await Promise.all(near.map(function(o){ return tourGoText(o.x).catch(function(){ return ''; }); }));
+    return 'À proximité : '+near.map(function(o,i){ return tourPName(o.x)+', à '+fmtM(o.d)+'.'+(parts[i]?' Depuis ta position : '+parts[i]:''); }).join(' ');
   }
   function tourStep(){
     if(!tour||tour.busy) return;
@@ -5154,7 +5221,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     try{ map.fitBounds(tour.pl.getBounds(),{padding:[30,30],maxZoom:17}); }catch(e){}
     speakAdd('Parcours d\u2019environ '+fmtM(T.total)+', '+T.stops.length+' étapes, une toutes les vingt secondes.'+(R0.fb?' Pas de boucle possible ici : retour par la même rue à la fin.':'')+(R0.approx?' Parcours approximatif.':''));
     try{ var nms=T.stops.filter(function(x){ return x.nm; }).map(function(x){ return x.nm; }); if(nms.length) speakAdd('Le tour passe par : '+nms.slice(0,12).join(', ')+'.'); }catch(e){}
-    try{ await Promise.race([poiP,new Promise(function(r){ setTimeout(r,5000); })]); var sm=tourSvcSummary(tk.pois||[],la,lo); if(sm) speakAdd(sm); }catch(e){}
+    try{ await Promise.race([poiP,new Promise(function(r){ setTimeout(r,5000); })]); var sm=tourSvcSummary(tk.pois||[],la,lo); if(sm) speakAdd(sm); var bt=await tourSvcBrief(tk); if(tour!==tk) return; if(bt) speakAdd(bt); }catch(e){}
     if(tour!==tk) return;
     if(R0.why){ try{ console.warn('tour',R0.why); }catch(e){} say('ℹ️ Parcours approximatif — '+R0.why,10000); }
     tour.last=Date.now()-TOUR_MS+4000; tour.busy=false;
