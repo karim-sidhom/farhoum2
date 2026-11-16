@@ -4653,6 +4653,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!txt&&!force&&satLast&&map.distance([satLast.lat,satLast.lon],[lat,lon])<SAT_MIN_M) return;
     if(!txt){
       try{
+        var tw=document.getElementById('svTxt'); if(tw) tw.textContent=(tw.textContent||'')+'\n🛰️ '+(AR?'تحليل الصورة الفضائية…':'Analyse de la photo satellite…');
         var ctl=new AbortController(), tm=setTimeout(function(){ ctl.abort(); },30000);
         var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctl.signal,
           body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr'})});
@@ -4679,7 +4680,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     var sat=describeHere(true,pos,quiet,tour);            /* 1) vue satellite / lieu : démarre tout de suite */
     var sv=svAiRead(lat,lon,0,sat);                       /* 2) Street View : démarre en même temps, parlée juste après */
     var poi=poiRead(lat,lon,Promise.allSettled([sat,sv]),!!force);   /* 3) services autour (pharmacie, mosquée…) */
-    satRead(lat,lon,Promise.allSettled([sat,sv,poi]),!!force);  /* 4) photo satellite : lue en dernier */
+    var cap=function(p,ms){ return Promise.race([p,new Promise(function(r){ setTimeout(r,ms); })]); };   /* on n'attend jamais plus de 12 s les autres lectures */
+    satRead(lat,lon,cap(Promise.allSettled([sat,sv,poi]),12000),!!force);  /* 4) photo satellite : lue en dernier */
     svTileHas(lat,lon).then(function(ok){ if(!ok){ try{ document.getElementById('svTxt').textContent+='\n🛣️ '+(AR?'لا توجد تغطية ستريت فيو':'Pas de couverture Street View ici'); }catch(e){} } });
   }
   var svLast=null;
