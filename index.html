@@ -4562,8 +4562,61 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     speak(tour?tour:'Street View. Je regarde le lieu.');
-    var dpS=describeHere(true,svPos,true,tour?{pre:pre}:false);
-    svAiRead(lat,lon,0,dpS); /* la scène Street View est lue APRÈS le lieu (restaurants, mosquées, services...) */
+    svReadBoth(lat,lon,svPos,true,tour?{pre:pre}:false); /* satellite + Street View lus EN PARALLÈLE */
+  }
+
+  /* ===== lecture EN PARALLÈLE : photo satellite (description du lieu) + Street View (si elle existe) =====
+     Les deux analyses démarrent ensemble ; la voix lit d'abord le satellite puis Street View sans attente supplémentaire. */
+  var svHasView=false;
+  function svTileHas(lat,lon){
+    return new Promise(function(res){
+      try{
+        var z=17, n=Math.pow(2,z), x=Math.floor((lon+180)/360*n), la=lat*Math.PI/180,
+            y=Math.floor((1-Math.log(Math.tan(la)+1/Math.cos(la))/Math.PI)/2*n);
+        var im=new Image(), done=false;
+        function fin(v){ if(!done){ done=true; res(v); } }
+        im.onload=function(){ fin(true); }; im.onerror=function(){ fin(false); };
+        setTimeout(function(){ fin(true); },4000);   /* en cas de doute on tente quand même Street View */
+        im.src='https://mts1.googleapis.com/vt?hl=fr&lyrs=svv|cb_client:apiv3&style=40,18&x='+x+'&y='+y+'&z='+z;
+      }catch(e){ res(true); }
+    });
+  }
+
+  /* ===== vraies images pour TalkBack : photo satellite + Street View (si elle existe) =====
+     Pas d'attribut alt volontairement : TalkBack / Chrome décrivent alors eux-mêmes l'image (descriptions d'images par IA).
+     100 % gratuit, aucune clé : seule l'image satellite (Esri) est exposée comme image ; Street View reste l'iframe. */
+  function svImgsBox(){
+    var b=document.getElementById('svImgs'); if(b) return b;
+    b=document.createElement('div'); b.id='svImgs';
+    b.style.cssText='position:absolute;left:0;right:0;bottom:46px;height:112px;z-index:3;display:flex;gap:6px;padding:4px;background:#000c;direction:ltr';
+    svUi().appendChild(b); return b;
+  }
+  function svImgSet(id,src,label){
+    var b=svImgsBox(), im=document.getElementById(id);
+    if(!im){ im=document.createElement('img'); im.id=id; im.tabIndex=0; im.style.cssText='height:104px;width:calc(50% - 3px);object-fit:cover;border:1px solid #d4af37;border-radius:6px;background:#222'; b.appendChild(im); }
+    im.removeAttribute('alt'); im.removeAttribute('aria-label');   /* surtout pas alt="" (= décoratif) */
+    im.src=src; im.style.display='';
+    return im;
+  }
+  function svImgHide(id){ var im=document.getElementById(id); if(im){ im.style.display='none'; im.removeAttribute('src'); } }
+  async function svImgsShow(lat,lon){
+    var dl=0.0006, dn=dl/Math.cos(lat*Math.PI/180);
+    svImgSet('svImgSat','https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox='
+      +(lon-dn).toFixed(6)+','+(lat-dl).toFixed(6)+','+(lon+dn).toFixed(6)+','+(lat+dl).toFixed(6)
+      +'&bboxSR=4326&imageSR=4326&size=512,512&format=jpg&f=image');
+  }
+  function svReadBoth(lat,lon,pos,quiet,tour){
+    svHasView=false;
+    svImgsShow(lat,lon);   /* images exposées à TalkBack, en parallèle */
+    var sat=describeHere(true,pos,quiet,tour);            /* 1) vue satellite / lieu : démarre tout de suite */
+    var sv=svAiRead(lat,lon,0,sat);                       /* 2) Street View : démarre en même temps, parlée juste après */
+    Promise.allSettled([sat,sv]).then(function(){
+      if(!svHasView){
+        var m=AR?'لا توجد صورة ستريت فيو لهذا المكان.':'Pas de photo Street View à cet endroit.';
+        say('🛣️ '+m,4000);
+      }
+    });
+    svTileHas(lat,lon).then(function(ok){ if(!ok){ try{ document.getElementById('svTxt').textContent+='\n🛣️ '+(AR?'لا توجد تغطية ستريت فيو':'Pas de couverture Street View ici'); }catch(e){} } });
   }
   var svLast=null;
   /* suivi : on se met à jour au plus toutes les 20 s, et seulement quand la lecture vocale précédente est finie */
@@ -4576,8 +4629,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     var p=svPend; svPend=null; svFT=now; svLast={lat:p.lat,lon:p.lon};
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+p.lat+','+p.lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+p.lat.toFixed(4)+', '+p.lon.toFixed(4)+' — 🌍 Analyse du lieu…';
-    var dpT=describeHere(true,null,true);
-    svAiRead(p.lat,p.lon,0,dpT);
+    svReadBoth(p.lat,p.lon,null,true,false);
   }
   setInterval(svTick,2000);
 
@@ -4692,7 +4744,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     svdLayer=L.layerGroup().addTo(map); svdR=L.canvas({padding:.5});
     svdLoadAll().then(function(){ if(svdN) say('🗺️ '+svdN+(AR?' نقطة بوصف':' points avec description'),3500); }).catch(function(){}).then(function(){ setInterval(svdPoll,SVD_EVERY); });
   }catch(e){ try{ console.warn('points descriptions',e); }catch(x){} }
-  var SV_WORKER='';   /* URL du worker sv-describe (vide = désactivé) */
+  var SV_WORKER='https://image.lordsidhom78.workers.dev';   /* URL du worker sv-describe (vide = désactivé) */
   var svAiSeq=0, svAiMem={}, svSideMem={};
   function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
   function svAiShow(txt,fromCache,m){
@@ -4722,6 +4774,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       var S=svSideMem[key];
       if(!S){ S=await svdbSides(lat,lon); if(S&&(S.exact||S.near.length)) svSideMem[key]=S; }
       if(S&&(S.exact||S.near.length)){
+        svHasView=true;
         if(after){ try{ await after; }catch(e){} }
         if(my===svAiSeq){ if(S.exact) svAiShow(S.exact.d.txt,true,S.exact.m); else svAiShowSides(S.near); }
         return; }
