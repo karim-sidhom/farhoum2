@@ -3958,12 +3958,12 @@ if('serviceWorker' in navigator){
   function introText(){ return AR ? 'اضغط مطولاً على أي مكان من الشاشة' : 'Appuie longtemps sur n\u2019importe quel endroit de l\u2019écran'; }
   function speakIntro(){ mySpeak(introText(),function(){ introDone=true; }); }
   var tourAuto=false, minimalOn=true;
-  function restoreUI(){            /* fin du tour : les boutons réapparaissent en haut, tout redevient normal */
+  function restoreUI(quiet){            /* fin du tour : les boutons réapparaissent en haut, tout redevient normal */
     if(!minimalOn) return; minimalOn=false;
     window.__speechOpen=true;
     document.documentElement.classList.remove('minimal');
     try{ map.invalidateSize(); map.getPane('mapPane').removeAttribute('aria-hidden'); }catch(e){}
-    try{ liveSay(AR?'انتهت الجولة. الأزرار ظاهرة في الأعلى':'Tour terminé. Les boutons sont affichés en haut de l\u2019écran.'); }catch(e){}
+    if(!quiet){ try{ liveSay(AR?'انتهت الجولة. الأزرار ظاهرة في الأعلى':'Tour terminé. Les boutons sont affichés en haut de l\u2019écran.'); }catch(e){} }
   }
   var _tourClear=tourClear; tourClear=function(){ var r=_tourClear.apply(this,arguments); restoreUI(); return r; };
   /* ===== si le GPS bouge de 15 m : lecture Street View à la position, puis toutes les 20 s le long de la trajectoire (ville non répétée) ===== */
@@ -3981,9 +3981,10 @@ if('serviceWorker' in navigator){
   function hereAnnounce(){         /* deux vibrations + « Tu es ici », puis le tour de quartier démarre (obligatoire) */
     buzz([250,120,250]); mySpeak(AR?'أنت هنا':'Tu es ici');
     if(tourAuto) return; tourAuto=true;
-    setTimeout(function(){ try{ window.__speechOpen=true; if(!tour) tourStart(); }catch(e){ restoreUI(); } },2300);
+    setTimeout(function(){ try{ window.__speechOpen=true; restoreUI(true); svOpen(); }catch(e){ restoreUI(true); } },2300);   /* plus de tour de quartier : on ouvre directement Street View + lecture à la position */
   }
   setTimeout(function(){ if(!introDone) speakIntro(); },1500);
+  setTimeout(function(){ try{ restoreUI(true); }catch(e){} },3000);   /* sécurité : plus jamais d'écran bloqué sans boutons (le tour qui les rendait n'existe plus) */
   function lpCancel(){ clearTimeout(lpTimer); lpTimer=null; lpStart=null; lpId=null; }
   function gpsPt(){ return meLast?map.latLngToContainerPoint([meLast.lat,meLast.lon]):null; }
   function checkHit(){            /* le doigt explore : deux vibrations quand il touche le point GPS */
@@ -4541,7 +4542,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     svBox=document.createElement('div');
     svBox.style.cssText='position:fixed;left:0;right:0;bottom:0;height:62vh;z-index:3200;background:#000;border-top:2px solid #d4af37;display:none;direction:ltr';
     svBox.innerHTML='<div id="svTxt" style="position:absolute;left:0;right:0;top:0;max-height:38%;overflow:auto;z-index:2;background:#0d1a6eE6;color:#fff;font:15px/1.4 system-ui,sans-serif;padding:8px 12px;direction:ltr;white-space:pre-wrap"></div>'+
-      '<iframe id="svFrame" style="position:absolute;inset:0 0 46px 0;width:100%;height:calc(100% - 46px);border:0" allowfullscreen loading="lazy"></iframe>'+
+      '<iframe id="svFrame" style="position:absolute;inset:0 0 114px 0;width:100%;height:calc(100% - 114px);border:0" allowfullscreen loading="lazy"></iframe>'+
       '<div style="position:absolute;left:0;right:0;bottom:0;height:46px;background:#0d1a6e;display:flex;gap:8px;align-items:center;justify-content:center">'+
       '<button id="svSos" style="background:#e02424;color:#fff;border:1px solid #fff;border-radius:8px;padding:8px 14px;font-weight:900">🆘 HELP</button>'+
       '<button id="svClose" style="background:transparent;color:#fff;border:1px solid #d4af37;border-radius:8px;padding:8px 14px">✕</button></div>';
@@ -4562,7 +4563,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+lat+','+lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+lat.toFixed(4)+', '+lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     speak(tour?tour:'Street View. Je regarde le lieu.');
-    svReadBoth(lat,lon,svPos,true,tour?{pre:pre}:false); /* satellite + Street View lus EN PARALLÈLE */
+    svReadBoth(lat,lon,svPos,true,tour?{pre:pre}:false,true); /* satellite + Street View lus EN PARALLÈLE */
   }
 
   /* ===== lecture EN PARALLÈLE : photo satellite (description du lieu) + Street View (si elle existe) =====
@@ -4588,12 +4589,12 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   function svImgsBox(){
     var b=document.getElementById('svImgs'); if(b) return b;
     b=document.createElement('div'); b.id='svImgs';
-    b.style.cssText='position:absolute;left:0;right:0;bottom:46px;height:112px;z-index:3;display:flex;gap:6px;padding:4px;background:#000c;direction:ltr';
+    b.style.cssText='position:absolute;left:0;right:0;bottom:46px;height:68px;z-index:3;display:flex;gap:6px;padding:4px;background:#000c;direction:ltr';
     svUi().appendChild(b); return b;
   }
   function svImgSet(id,src,label){
     var b=svImgsBox(), im=document.getElementById(id);
-    if(!im){ im=document.createElement('img'); im.id=id; im.tabIndex=0; im.style.cssText='height:104px;width:calc(50% - 3px);object-fit:cover;border:1px solid #d4af37;border-radius:6px;background:#222'; b.appendChild(im); }
+    if(!im){ im=document.createElement('img'); im.id=id; im.tabIndex=0; im.style.cssText='height:60px;width:calc(50% - 3px);object-fit:cover;border:1px solid #d4af37;border-radius:6px;background:#222'; b.appendChild(im); }
     im.removeAttribute('alt'); im.removeAttribute('aria-label');   /* surtout pas alt="" (= décoratif) */
     im.src=src; im.style.display='';
     return im;
@@ -4605,17 +4606,80 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       +(lon-dn).toFixed(6)+','+(lat-dl).toFixed(6)+','+(lon+dn).toFixed(6)+','+(lat+dl).toFixed(6)
       +'&bboxSR=4326&imageSR=4326&size=512,512&format=jpg&f=image');
   }
-  function svReadBoth(lat,lon,pos,quiet,tour){
+
+
+  /* ===== 🏪 services rencontrés autour de la personne (pharmacie, mosquée, hôpital, banque…), lus à chaque nouvelle position ===== */
+  var poiSeq=0, poiSaid={}, POI_R=150;
+  var POI_AR={pharmacy:'صيدلية',mosque:'جامع',hospital:'مستشفى',clinic:'عيادة',doctors:'عيادة طبيب',dentist:'طبيب أسنان',atm:'صرّاف آلي',bank:'بنك',fuel:'محطة وقود',post:'مكتب بريد',police:'مركز شرطة',supermarket:'سوق ممتازة',bakery:'مخبزة',school:'مدرسة',cafe:'مقهى',restaurant:'مطعم'};
+  var CARD_AR=['شمال','شمال شرق','شرق','جنوب شرق','جنوب','جنوب غرب','غرب','شمال غرب'];
+  async function poiRead(lat,lon,after,force){
+    var my=++poiSeq, pois;
+    try{ pois=await tourPois(lat,lon); }catch(e){ return; }
+    if(!pois||!pois.length) return;
+    var near=[];
+    pois.forEach(function(x){
+      var d=dHav(lat,lon,x.la,x.lo); if(d>POI_R) return;
+      if(!force&&poiSaid[x.id]) return;                  /* un service déjà annoncé n'est pas répété quand la personne marche */
+      near.push({x:x,d:d,b:dBearing(lat,lon,x.la,x.lo)});
+    });
+    if(!near.length) return;
+    near.sort(function(a,b){ return (TOUR_PORD.indexOf(a.x.t)-TOUR_PORD.indexOf(b.x.t))||(a.d-b.d); });
+    near=near.slice(0,4);
+    if(after){ try{ await after; }catch(e){} }
+    if(my!==poiSeq) return;                              /* la personne a bougé : liste périmée */
+    near.forEach(function(o){ poiSaid[o.x.id]=1; });
+    var parts=near.map(function(o){
+      var ci=Math.round(o.b/45)%8, n=Math.round(o.d);
+      if(AR){
+        var nm=o.x.a||o.x.n||'';
+        return (POI_AR[o.x.t]||'')+(nm?' '+nm:'')+'، على بعد '+n+' متر نحو '+CARD_AR[ci];
+      }
+      var l=TOUR_PLBL[o.x.t][0], nf=o.x.n||'', t=(nf&&dNorm(nf).indexOf(dNorm(l).split(' ')[0])>-1)?nf:(l+(nf?' '+nf:''));
+      var c=D_CARD[ci], pre=(c==='est'||c==='ouest')?'à l\u2019':'au ';
+      return t.charAt(0).toUpperCase()+t.slice(1)+', à '+n+' mètre'+(n>1?'s':'')+' '+pre+c;
+    });
+    var head=AR?'خدمات قريبة منك: ':'Services à proximité : ';
+    var txt=head+parts.join('. ')+'.';
+    var t2=document.getElementById('svTxt'); if(t2) t2.textContent=(t2.textContent||'')+'\n🏪 '+txt;
+    speakAdd(txt);
+  }
+  /* ===== 🛰️ lecture de la photo satellite au-dessus de la personne, à chaque nouvelle position ===== */
+  var satSeq=0, satMem={}, satLast=null, satFailSaid=false, SAT_MIN_M=40;
+  async function satRead(lat,lon,after,force){
+    if(!SV_WORKER) return;
+    var my=++satSeq, key=(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4), txt=satMem[key];
+    if(!txt){ try{ txt=localStorage.getItem('sat:'+key)||''; }catch(e){ txt=''; } }
+    /* quota gratuit limité : on ne relit le satellite que si on a bougé d'au moins 40 m (ou si la personne l'a demandé) */
+    if(!txt&&!force&&satLast&&map.distance([satLast.lat,satLast.lon],[lat,lon])<SAT_MIN_M) return;
+    if(!txt){
+      try{
+        var ctl=new AbortController(), tm=setTimeout(function(){ ctl.abort(); },30000);
+        var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},signal:ctl.signal,
+          body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr'})});
+        clearTimeout(tm);
+        var j=await r.json();
+        if(!r.ok||!j.txt) throw new Error((j&&j.error)||('HTTP '+r.status));
+        txt=j.txt; satMem[key]=txt; try{ localStorage.setItem('sat:'+key,txt); }catch(e){}
+      }catch(e){
+        if(my===satSeq){ var t=document.getElementById('svTxt'); if(t) t.textContent=(t.textContent||'')+'\n🛰️ '+(AR?'وصف الصورة الفضائية غير متاح الآن':'Description satellite indisponible pour le moment');
+          if(!satFailSaid){ satFailSaid=true; speakAdd(AR?'وصف الصورة الفضائية غير متاح الآن.':'Description satellite indisponible pour le moment.'); } }
+        return;
+      }
+    }
+    if(after){ try{ await after; }catch(e){} }     /* d'abord le lieu et Street View, puis le satellite */
+    if(my!==satSeq) return;                         /* la personne a encore bougé : on ne lit pas une position périmée */
+    satLast={lat:lat,lon:lon};
+    var t2=document.getElementById('svTxt'); if(t2) t2.textContent=(t2.textContent||'')+'\n🛰️ '+txt;
+    speakAdd(AR?'الصورة الفضائية فوقك.':'Vue satellite au-dessus de vous.');
+    speakAdd(txt);
+  }
+  function svReadBoth(lat,lon,pos,quiet,tour,force){
     svHasView=false;
     svImgsShow(lat,lon);   /* images exposées à TalkBack, en parallèle */
     var sat=describeHere(true,pos,quiet,tour);            /* 1) vue satellite / lieu : démarre tout de suite */
     var sv=svAiRead(lat,lon,0,sat);                       /* 2) Street View : démarre en même temps, parlée juste après */
-    Promise.allSettled([sat,sv]).then(function(){
-      if(!svHasView){
-        var m=AR?'لا توجد صورة ستريت فيو لهذا المكان.':'Pas de photo Street View à cet endroit.';
-        say('🛣️ '+m,4000);
-      }
-    });
+    var poi=poiRead(lat,lon,Promise.allSettled([sat,sv]),!!force);   /* 3) services autour (pharmacie, mosquée…) */
+    satRead(lat,lon,Promise.allSettled([sat,sv,poi]),!!force);  /* 4) photo satellite : lue en dernier */
     svTileHas(lat,lon).then(function(ok){ if(!ok){ try{ document.getElementById('svTxt').textContent+='\n🛣️ '+(AR?'لا توجد تغطية ستريت فيو':'Pas de couverture Street View ici'); }catch(e){} } });
   }
   var svLast=null;
@@ -4744,7 +4808,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     svdLayer=L.layerGroup().addTo(map); svdR=L.canvas({padding:.5});
     svdLoadAll().then(function(){ if(svdN) say('🗺️ '+svdN+(AR?' نقطة بوصف':' points avec description'),3500); }).catch(function(){}).then(function(){ setInterval(svdPoll,SVD_EVERY); });
   }catch(e){ try{ console.warn('points descriptions',e); }catch(x){} }
-  var SV_WORKER='https://image.lordsidhom78.workers.dev';   /* URL du worker sv-describe (vide = désactivé) */
+  var SV_WORKER='https://image.lordsidhom78.workers.dev';   /* worker SATELLITE (description de la photo vue d'en haut) */
+  var SV_STREET_WORKER='';   /* worker pour de vraies photos de rue (vide = on lit seulement les descriptions Street View déjà stockées) */   /* URL du worker sv-describe (vide = désactivé) */
   var svAiSeq=0, svAiMem={}, svSideMem={};
   function svAiKey(lat,lon){ return 'sv:'+(AR?'a':'f')+':'+lat.toFixed(4)+','+lon.toFixed(4); }
   function svAiShow(txt,fromCache,m){
@@ -4778,8 +4843,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
         if(after){ try{ await after; }catch(e){} }
         if(my===svAiSeq){ if(S.exact) svAiShow(S.exact.d.txt,true,S.exact.m); else svAiShowSides(S.near); }
         return; }
-      if(!SV_WORKER){ if(my===svAiSeq){ say('👁️ pas encore de description ici',4000); speakAdd(AR?'لا يوجد وصف لهذا المكان. كن حذرا.':'Pas de description ici. Restez prudent.'); } return; } /* pas de worker : on ne lit que ce qui est déjà stocké */
-      var r=await fetch(SV_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},
+      if(!SV_STREET_WORKER){ if(my===svAiSeq){ say('👁️ pas encore de description ici',4000); speakAdd(AR?'لا يوجد وصف لهذا المكان. كن حذرا.':'Pas de description ici. Restez prudent.'); } return; } /* pas de worker : on ne lit que ce qui est déjà stocké */
+      var r=await fetch(SV_STREET_WORKER.replace(/\/$/,'')+'/desc',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({lat:lat,lon:lon,lang:AR?'ar':'fr',heading:heading||0})});
       var j=await r.json();
       if(!r.ok||!j.txt){ if(my===svAiSeq) say('👁️ '+(j&&j.error||'description indisponible'),5000); return; }
