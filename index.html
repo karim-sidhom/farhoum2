@@ -5624,5 +5624,183 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   window.addEventListener('resize',function(){ if(pill.style.display==='block') place(); });
 })();
 </script>
+<script>
+/* ===== 🦯 Alerte trottoir pour personnes non voyantes =====
+   Zone VERTE  : bande de 1 m sur le trottoir, le long du bord de chaque rue/ruelle (des deux côtés)
+   Zone ROUGE  : la chaussée elle-même, d'un bord à l'autre, + intersections jusqu'à l'autre rive
+   Sons        : bip lent en zone verte -> de plus en plus rapide en approchant du rouge -> très rapide en zone rouge */
+(function(){
+  if(typeof map==='undefined'||typeof L==='undefined') return;
+  var GREEN_M=1.0, FETCH_R=150, REFETCH_M=50, VIEW_MOVE=120;
+  var EP=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
+  var DEF_W={motorway:14,trunk:12,primary:10,secondary:8,tertiary:7,unclassified:6,residential:6,living_street:5,service:3.5,track:3,road:5};
+  var on=false, watchId=null, ac=null, timer=null, me=null, data=null, fetchBusy=false, lastFetch=null, layers=[], pane=null, state='none', dEdge=99, first=false;
+
+  /* ---------- bouton ---------- */
+  var bar=document.getElementById('bar'), btn=document.createElement('button');
+  btn.id='safeBtn'; btn.type='button'; btn.textContent='🦯';
+  btn.title='Alerte trottoir / تنبيه الرصيف'; btn.setAttribute('aria-label','Alerte trottoir : désactivée'); btn.setAttribute('aria-pressed','false');
+  var satB=document.getElementById('sat'); if(bar){ if(satB&&satB.parentNode) satB.parentNode.insertBefore(btn,satB.nextSibling); else bar.appendChild(btn); } else document.body.appendChild(btn);
+  var vb=document.createElement('button'); vb.id='safeVis'; vb.type='button'; vb.textContent='🟩'; vb.title='Zones vertes/rouges'; vb.setAttribute('aria-pressed','true'); vb.setAttribute('aria-label','Zones vertes et rouges : affichées');
+  btn.parentNode.insertBefore(vb,btn.nextSibling); vb.style.outline='3px solid #fff';
+  vb.onclick=function(){ visOn=!visOn; vb.style.outline=visOn?'3px solid #fff':''; vb.setAttribute('aria-pressed',visOn?'true':'false'); vb.setAttribute('aria-label','Zones vertes et rouges : '+(visOn?'affichées':'masquées')); if(visOn){ lg.addTo(map); resize(); loadView(); } else map.removeLayer(lg); };
+  var toast=document.createElement('div');
+  toast.style.cssText='position:fixed;left:50%;transform:translateX(-50%);top:calc(110px + env(safe-area-inset-top));z-index:3600;background:#0d1a6eF2;color:#fff;border:1px solid #d4af37;border-radius:12px;padding:8px 14px;font-size:13px;max-width:calc(100vw - 32px);text-align:center;display:none';
+  document.body.appendChild(toast); var tt=null;
+  function say(t,ms){ toast.textContent=t; toast.style.display='block'; clearTimeout(tt); tt=setTimeout(function(){toast.style.display='none';},ms||3500);
+    var live=document.getElementById('a11yLive'); if(live) live.textContent=t; }
+  function speak(t){ try{ if(!window.speechSynthesis) return; var u=new SpeechSynthesisUtterance(t); u.lang='fr-FR'; speechSynthesis.speak(u); }catch(e){} }
+
+  /* ---------- géométrie (mètres, repère local autour du centre de chargement) ---------- */
+  function proj(c,la,lo){ return {x:(lo-c.lon)*111320*Math.cos(c.lat*Math.PI/180), y:(la-c.lat)*111320}; }
+  function ptSeg(px,py,a,b){ var dx=b.x-a.x, dy=b.y-a.y, l=dx*dx+dy*dy, t=l?Math.max(0,Math.min(1,((px-a.x)*dx+(py-a.y)*dy)/l)):0, x=a.x+t*dx-px, y=a.y+t*dy-py; return Math.sqrt(x*x+y*y); }
+  function halfW(tags){
+    var w=parseFloat(String(tags.width||'').replace(',','.'));
+    if(!(w>0)){ var ln=parseInt(tags.lanes,10); if(ln>0) w=ln*3.0; }
+    if(!(w>0)) w=DEF_W[tags.highway]||5;
+    return Math.max(1.5,Math.min(w,30))/2;
+  }
+  /* distance signée au bord de chaussée : <=0 dans la chaussée (rouge), 0..1 m sur le trottoir (vert) */
+  function signed(x,y){
+    if(!data) return 99; var best=99, i,j,w,d;
+    for(i=0;i<data.ways.length;i++){ w=data.ways[i];
+      for(j=0;j<w.pts.length-1;j++){ d=ptSeg(x,y,w.pts[j],w.pts[j+1])-w.hw; if(d<best) best=d; } }
+    for(i=0;i<data.junc.length;i++){ var jn=data.junc[i]; d=Math.sqrt((x-jn.x)*(x-jn.x)+(y-jn.y)*(y-jn.y))-jn.r; if(d<best) best=d; }
+    return best;
+  }
+
+  /* ---------- chargement des rues (OpenStreetMap / Overpass) ---------- */
+  async function overpass(q){
+    /* même méthode que le reste de l'application : POST sur 3 serveurs en parallèle */
+    try{ if(typeof alaFetch==='function'){ var r0=await alaFetch(q); if(r0) return r0; } }catch(e){}
+    for(var k=0;k<EP.length;k++){
+      try{ var ctl=new AbortController(), to=setTimeout(function(){ctl.abort();},25000);
+        var r=await fetch(EP[k],{method:'POST',body:'data='+encodeURIComponent(q),signal:ctl.signal}); clearTimeout(to);
+        if(!r.ok) continue; var j=await r.json(); if(j&&j.elements) return j.elements; }catch(e){}
+    }
+    return null;
+  }
+  function parse(els,c){
+    var ways=[], cnt={}, nodePos={}, nodeHw={};
+    els.forEach(function(e){
+      if(!e.geometry||e.geometry.length<2) return;
+      var hw=halfW(e.tags||{}), pts=e.geometry.map(function(g){return proj(c,g.lat,g.lon);});
+      ways.push({pts:pts,hw:hw,ll:e.geometry.map(function(g){return [g.lat,g.lon];})});
+      (e.nodes||[]).forEach(function(id,i){ var g=e.geometry[i]; if(!g) return;
+        cnt[id]=(cnt[id]||0)+1; nodePos[id]=g; nodeHw[id]=Math.max(nodeHw[id]||0,hw); });
+    });
+    var junc=[]; Object.keys(cnt).forEach(function(id){ if(cnt[id]>=2){ var g=nodePos[id], p=proj(c,g.lat,g.lon); junc.push({x:p.x,y:p.y,r:nodeHw[id],ll:[g.lat,g.lon]}); } });
+    return {c:c,ways:ways,junc:junc};
+  }
+  function query(la,lo,r){
+    return '[out:json][timeout:25];way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|corridor|bridleway|elevator|proximity|construction|raceway|platform"]["area"!="yes"]["tunnel"!="yes"](around:'+r+','+la+','+lo+');out geom tags;';
+  }
+  /* rues autour de l'utilisateur (pour les sons) */
+  async function loadRoads(la,lo){
+    if(fetchBusy) return; fetchBusy=true;
+    var els=await overpass(query(la,lo,FETCH_R)); fetchBusy=false;
+    if(!els){ say('⚠️ Impossible de charger les rues (réseau)',4000); speak('Attention. Les rues ne se chargent pas. Alerte indisponible.'); setTimeout(function(){ if(on&&me) loadRoads(me.lat,me.lon); },8000); return; }
+    data=parse(els,{lat:la,lon:lo}); lastFetch={lat:la,lon:lo};
+    if(data.ways.length){ speak('Alerte prête. '+data.ways.length+' rues autour de vous.'); } else { speak('Aucune rue trouvée autour de vous.'); }
+  }
+  /* ---------- zones affichées en permanence sur la carte, comme les traits bleus Street View ---------- */
+  var CELL=0.006, cells={}, visOn=true, hinted=false, running=false, lg=L.layerGroup();
+  function ckey(i,j){ return i+'_'+j; }
+  function mkStyleG(w){ return {color:'#00e060',opacity:.95,weight:w,lineCap:'round',lineJoin:'round',pane:'safePane',interactive:false}; }
+  function mkStyleR(w){ return {color:'#ff1a1a',opacity:.95,weight:w,lineCap:'round',lineJoin:'round',pane:'safePane',interactive:false}; }
+  function ensurePane(){ if(!pane){ pane=map.createPane('safePane'); pane.style.zIndex=470; pane.style.pointerEvents='none'; lg.addTo(map); } }
+  function mpp(){ return 156543.03392*Math.cos(map.getCenter().lat*Math.PI/180)/Math.pow(2,map.getZoom()); }
+  function resize(){ var m=mpp(); layers.forEach(function(o){ o.l.setStyle({weight:Math.max(o.red?3:6,o.m/m)}); }); }
+  function drawCell(d){
+    ensurePane(); var m=mpp(), i, out=[];
+    for(i=0;i<d.ways.length;i++){ var w=d.ways[i], mm=2*w.hw+2*GREEN_M; out.push({l:L.polyline(w.ll,mkStyleG(Math.max(6,mm/m))),m:mm}); }
+    for(i=0;i<d.junc.length;i++){ var j=d.junc[i]; out.push({l:L.circle(j.ll,{radius:j.r+GREEN_M,stroke:false,fillColor:'#00e060',fillOpacity:.95,pane:'safePane',interactive:false}),m:null,circ:1}); }
+    for(i=0;i<d.ways.length;i++){ var w2=d.ways[i], m2=2*w2.hw; out.push({l:L.polyline(w2.ll,mkStyleR(Math.max(3,m2/m))),m:m2,red:1}); }
+    for(i=0;i<d.junc.length;i++){ var j2=d.junc[i]; out.push({l:L.circle(j2.ll,{radius:j2.r,stroke:false,fillColor:'#ff1a1a',fillOpacity:.95,pane:'safePane',interactive:false}),m:null,circ:1,red:1}); }
+    out.forEach(function(o){ lg.addLayer(o.l); if(!o.circ) layers.push(o); });
+    return out;
+  }
+  function stat(t){ var e=document.getElementById('alast'); if(e) e.textContent=t; }
+  async function loadView(){
+    if(!visOn||running) return;
+    var z=map.getZoom();
+    if(z<14){ if(!hinted){ hinted=true; say('🔍 Zoomez (niveau 14 ou plus) pour voir les zones 🟢 vertes et 🔴 rouges',6000); } return; }
+    var b=map.getBounds(), i0=Math.floor(b.getSouth()/CELL), i1=Math.floor(b.getNorth()/CELL), j0=Math.floor(b.getWest()/CELL), j1=Math.floor(b.getEast()/CELL);
+    if((i1-i0+1)*(j1-j0+1)>16){ var c=map.getCenter(); i0=Math.floor(c.lat/CELL)-1; i1=i0+2; j0=Math.floor(c.lng/CELL)-1; j1=j0+2; }
+    var todo=[], now=Date.now();
+    for(var i=i0;i<=i1;i++) for(var j=j0;j<=j1;j++){ var k=ckey(i,j), c0=cells[k]; if(!c0||(c0.fail&&now-c0.fail>8000)) todo.push([i,j,k]); }
+    if(!todo.length) return;
+    running=true; var okN=0, failN=0;
+    for(var n=0;n<todo.length;n++){
+      var t=todo[n]; stat('🟢🔴 '+(n+1)+'/'+todo.length);
+      var S=t[0]*CELL, W=t[1]*CELL, N=S+CELL, E=W+CELL;
+      var q='[out:json][timeout:25];way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|corridor|bridleway|elevator|proximity|construction|raceway|platform"]["area"!="yes"]["tunnel"!="yes"]('+S+','+W+','+N+','+E+');out geom tags;';
+      var els=await overpass(q);
+      if(!els){ cells[t[2]]={fail:Date.now()}; failN++; continue; }
+      var d=parse(els,{lat:(S+N)/2,lon:(W+E)/2}); cells[t[2]]={d:d,drawn:drawCell(d)}; okN++;
+    }
+    running=false; stat('');
+    if(failN){ say('⚠️ Serveur des rues occupé — nouvel essai automatique…',4000); setTimeout(loadView,9000); }
+    else if(okN){ say('🟢 zone verte (1 m du bord) · 🔴 zone rouge (chaussée)',3500); setTimeout(loadView,300); }
+  }
+  map.on('zoomend moveend',function(){ if(visOn){ resize(); loadView(); } });
+  setTimeout(loadView,800);
+
+  /* ---------- position ---------- */
+  function onPos(p){
+    var la=p.coords.latitude, lo=p.coords.longitude; me={lat:la,lon:lo,acc:p.coords.accuracy};
+    if(!first){ first=true; map.setView([la,lo],Math.max(map.getZoom(),18)); }
+    if(!lastFetch||ptDist(la,lo,lastFetch.lat,lastFetch.lon)>REFETCH_M) loadRoads(la,lo);
+    evalPos();
+  }
+  function ptDist(a,b,c,d){ var k=111320, x=(d-b)*k*Math.cos(a*Math.PI/180), y=(c-a)*k; return Math.sqrt(x*x+y*y); }
+  function evalPos(){
+    if(!me||!data){ state='none'; return; }
+    var p=proj(data.c,me.lat,me.lon), s=signed(p.x,p.y); dEdge=s;
+    var ns= s<=0?'red' : s<=GREEN_M?'green' : 'none';
+    if(ns!==state){ if(ns==='green'&&state==='none') speak('Bord de rue'); if(ns==='none'&&state!=='none') speak('Zone sûre'); state=ns; if(navigator.vibrate&&ns==='red'){ try{navigator.vibrate([120,60,120]);}catch(e){} } }
+  }
+  function onErr(e){ say(e&&e.code===1?'⚠️ Autorisez la localisation / فعّل إذن الموقع':'⚠️ Position indisponible',5000); }
+
+  /* ---------- sons ---------- */
+  function beep(freq,dur){
+    if(!ac) return; try{
+      var o=ac.createOscillator(), g=ac.createGain(), t=ac.currentTime;
+      o.type='sine'; o.frequency.value=freq; o.connect(g); g.connect(ac.destination);
+      g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.6,t+0.008); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+      o.start(t); o.stop(t+dur+0.02);
+    }catch(e){}
+  }
+  function tick(){
+    if(!on) return; var next=300;
+    if(me&&data&&Date.now()-(me.t||0)>=0){ /* état actualisé à chaque fix GPS */ }
+    if(state==='green'){
+      var f=1-Math.max(0,Math.min(1,dEdge/GREEN_M));          /* 0 = à 1 m du rouge, 1 = au bord */
+      beep(600+300*f,0.09); next=1000-700*f;                  /* 1000 ms -> 300 ms */
+    } else if(state==='red'){
+      beep(1500,0.05); next=100;                              /* très rapide */
+    }
+    timer=setTimeout(tick,next);
+  }
+
+  /* ---------- activation ---------- */
+  function setOn(v){
+    on=v; btn.setAttribute('aria-pressed',v?'true':'false'); btn.style.outline=v?'3px solid #fff':'';
+    btn.setAttribute('aria-label','Alerte trottoir : '+(v?'activée':'désactivée'));
+    if(v){
+      try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)(); if(ac.state==='suspended') ac.resume(); }catch(e){}
+      if(!navigator.geolocation){ say('⚠️ Géolocalisation non supportée',4000); return; }
+      if(watchId==null) watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:500,timeout:15000});
+      say('🦯 Alerte activée — 🟢 bip lent : 1 m du bord · 🔴 bip rapide : chaussée',5000); speak('Alerte trottoir activée');
+      clearTimeout(timer); tick(); if(me) map.setView([me.lat,me.lon],Math.max(map.getZoom(),18));
+    } else {
+      if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
+      clearTimeout(timer); state='none'; say('🦯 Alerte désactivée',2500); speak('Alerte trottoir désactivée');
+    }
+  }
+  btn.onclick=function(){ setOn(!on); };
+  window.safeZones={signed:signed,state:function(){return state;}};
+})();
+</script>
 </body>
 </html>
