@@ -5659,7 +5659,10 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
 
   function say(t,ms){ toast.textContent=t; toast.style.display='block'; clearTimeout(tt); tt=setTimeout(function(){toast.style.display='none';},ms||3500);
     var live=document.getElementById('a11yLive'); if(live) live.textContent=t; }
-  function speak(t){ try{ if(!window.speechSynthesis) return; var u=new SpeechSynthesisUtterance(t); u.lang='fr-FR'; speechSynthesis.speak(u); }catch(e){} }
+  function speak(t,n,t0){ try{ var s_=window.speechSynthesis; if(!s_) return; n=n||0; t0=t0||Date.now();
+    var u=new SpeechSynthesisUtterance(t); u.lang='fr-FR'; u.__ok=true;   /* __ok : passe le filtre global de la synthèse vocale */
+    u.onerror=function(e){ if(on&&n<2&&Date.now()-t0<5000&&e&&(e.error==='canceled'||e.error==='interrupted')) setTimeout(function(){ speak(t,n+1,t0); },300); };   /* coupée par Street View/autre : on relance */
+    s_.speak(u); }catch(e){} }
 
   /* ---------- géométrie (mètres, repère local autour du centre de chargement) ---------- */
   function proj(c,la,lo){ return {x:(lo-c.lon)*111320*Math.cos(c.lat*Math.PI/180), y:(la-c.lat)*111320}; }
@@ -5852,15 +5855,30 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
 
   /* ---------- sons ---------- */
   function beep(freq,dur){
-    if(!ac) return; try{
+    if(!ac) return; wake(); try{
       var o=ac.createOscillator(), g=ac.createGain(), t=ac.currentTime;
       o.type='sine'; o.frequency.value=freq; o.connect(g); g.connect(ac.destination);
       g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.6,t+0.008); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
       o.start(t); o.stop(t+dur+0.02);
     }catch(e){}
   }
+  /* ---------- le son ne doit jamais se couper : oscillateur inaudible permanent + reprise automatique ---------- */
+  var keep=null;
+  function startKeep(){ try{ if(!ac||keep) return; var o=ac.createOscillator(), g=ac.createGain(); g.gain.value=0.0002; o.frequency.value=25; o.connect(g); g.connect(ac.destination); o.start(); keep=o; }catch(e){} }
+  function stopKeep(){ try{ if(keep){ keep.stop(); keep.disconnect(); } }catch(e){} keep=null; }
+  function wake(){ if(!on) return;
+    try{
+      if(!ac||ac.state==='closed'){ ac=new (window.AudioContext||window.webkitAudioContext)(); keep=null; }
+      if(ac.state!=='running') ac.resume();
+      if(!ac.__hook){ ac.__hook=true; ac.onstatechange=function(){ if(on&&ac.state!=='running'){ try{ ac.resume(); }catch(e){} } }; }
+      startKeep();
+    }catch(e){} }
+  document.addEventListener('visibilitychange',wake); window.addEventListener('focus',wake); window.addEventListener('pageshow',wake);
+  ['touchstart','click','pointerdown'].forEach(function(ev){ document.addEventListener(ev,wake,true); });
+  setInterval(wake,1500);
+
   function tick(){
-    if(!on) return; var next=300, fw=fault();
+    if(!on) return; wake(); var next=300, fw=fault();
     if(fw){
       beep(220,0.35); next=1500;                              /* bip GRAVE et long : ne vous fiez pas à l'alerte */
       if(fw!==faultWhy||Date.now()-faultT>15000){ faultWhy=fw; faultT=Date.now(); speak('Attention. '+fw+'. Ne vous fiez pas à l\'alerte.'); }
@@ -5880,7 +5898,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     on=v; btn.setAttribute('aria-pressed',v?'true':'false'); btn.style.outline=v?'3px solid #fff':'';
     btn.setAttribute('aria-label','Alerte trottoir : '+(v?'activée':'désactivée'));
     if(v){
-      try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)(); if(ac.state==='suspended') ac.resume(); }catch(e){}
+      try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)(); if(ac.state==='suspended') ac.resume(); startKeep(); }catch(e){}
       if(!navigator.geolocation){ say('⚠️ Géolocalisation non supportée',4000); return; }
       onSince=Date.now(); readySaid=false; errSaid=0;
       if(watchId==null) watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:500,timeout:15000});
@@ -5888,7 +5906,7 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
       clearTimeout(timer); tick(); if(me){ map.setView([me.lat,me.lon],Math.max(map.getZoom(),18)); loadUser(); }
     } else {
       if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
-      clearTimeout(timer); state='none'; say('🦯 Alerte désactivée',2500); speak('Alerte trottoir désactivée');
+      clearTimeout(timer); stopKeep(); state='none'; say('🦯 Alerte désactivée',2500); speak('Alerte trottoir désactivée');
     }
   }
   btn.onclick=function(){ setOn(!on); };
