@@ -78,6 +78,34 @@ html.minimal #bar,html.minimal #zonePill,html.minimal #risk,html.minimal #pwaBox
   s.speak=function(u){ if(window.__speechOpen||(u&&u.__ok)) return o(u); }; }catch(e){}
   document.documentElement.classList.add('minimal'); })();
 </script>
+<script>
+/* ===== Filtre GPS commun : lisse la position et ignore les sauts (le GPS « saute et resaute » = faux déplacements) =====
+   - fix trop imprécis (> maxAcc m) : ignoré, on garde la dernière bonne position
+   - saut impossible (vitesse > vmax) : mis en attente, accepté seulement s'il est confirmé par le fix suivant
+   - sinon : filtre de Kalman (lissage selon la précision de chaque fix) */
+window.makeGpsFilter=function(o){
+  o=o||{}; var MAXACC=o.maxAcc||40, Q=o.q||3, VMAX=o.vmax||18, st=null, cand=null, t0=Date.now();
+  function xy(a,b){ return {x:(b.lon-a.lon)*111320*Math.cos(a.lat*Math.PI/180), y:(b.lat-a.lat)*111320}; }
+  function out(){ return {lat:st.lat,lon:st.lon,est:Math.sqrt(st.v)}; }
+  return function(p){
+    var c=(p&&p.coords)||p||{}, lat=c.latitude, lon=c.longitude;
+    if(typeof lat!=='number'||typeof lon!=='number'||lat!==lat||lon!==lon) return null;
+    var acc=Math.max(3,c.accuracy||25), t=(p&&p.timestamp)||Date.now();
+    if(acc>MAXACC&&(st||Date.now()-t0<15000)) return null;
+    if(!st){ st={lat:lat,lon:lon,v:acc*acc,t:t}; return out(); }
+    var dt=Math.max(0.2,(t-st.t)/1000), m=xy(st,{lat:lat,lon:lon}), d=Math.sqrt(m.x*m.x+m.y*m.y);
+    if(d>Math.max(15,2*acc)&&d/dt>VMAX){
+      if(cand){ var m2=xy(cand,{lat:lat,lon:lon}); if(Math.sqrt(m2.x*m2.x+m2.y*m2.y)<=Math.max(20,2*acc)){ cand=null; st={lat:lat,lon:lon,v:acc*acc,t:t}; return out(); } }
+      cand={lat:lat,lon:lon}; return null;
+    }
+    cand=null;
+    var v=st.v+dt*Q*Q, k=v/(v+acc*acc);
+    st.lat+=(lat-st.lat)*k; st.lon+=(lon-st.lon)*k; st.v=(1-k)*v; st.t=t;
+    return out();
+  };
+};
+</script>
+
 <style>
 .sr-only{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 #a11y{position:fixed;top:0;left:0;right:0;z-index:5000}
@@ -3976,14 +4004,33 @@ if('serviceWorker' in navigator){
   var _tourClear=tourClear; tourClear=function(){ var r=_tourClear.apply(this,arguments); restoreUI(); return r; };
   /* ===== si le GPS bouge de 15 m : lecture Street View à la position, puis toutes les 20 s le long de la trajectoire (ville non répétée) ===== */
   var followRef=null;
+  /* Street View ne lit QUE si on change de rue : le nom de la rue (Nominatim) doit être différent de la rue actuelle
+     ET confirmé 2 fois de suite (un saut du GPS vers la rue d'à côté puis retour ne déclenche rien) */
+  var stCur=null, stCand=null, stN=0, stLastPos=null, stLastT=0, stBusy=false;
+  function stName(lat,lon){
+    return fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=17&accept-language='+(AR?'ar':'fr')+'&lat='+lat+'&lon='+lon)
+      .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(j){ var a=(j&&j.address)||{}, n=a.road||a.pedestrian||a.footway||a.path||a.cycleway||(j&&j.name)||''; n=String(n).trim().toLowerCase(); return n||null; });
+  }
+  function stCheck(){
+    if(stBusy||!meLast||tour) return;
+    var now=Date.now(); if(now-stLastT<3500) return;
+    if(!stCand&&stLastPos&&map.distance([stLastPos.lat,stLastPos.lon],[meLast.lat,meLast.lon])<8) return;   /* pas bougé : même rue */
+    stBusy=true; stLastT=now; var pos={lat:meLast.lat,lon:meLast.lon};
+    stName(pos.lat,pos.lon).then(function(n){
+      stLastPos=pos; if(!n) return;
+      if(stCur===null){ stCur=n; return; }                   /* première rue : simple mémorisation */
+      if(n===stCur){ stCand=null; stN=0; return; }
+      if(n===stCand) stN++; else { stCand=n; stN=1; }
+      if(stN>=2){ stCur=n; stCand=null; stN=0; window.__streetGo=true; }
+    }).catch(function(){}).then(function(){ stBusy=false; });
+  }
   setInterval(function(){
     try{
+      stCheck();
       if(tour||!meLast) return;
-      if(svBox&&svBox.style.display!=='none'){ followRef=null; return; }   /* déjà ouvert : svFollow gère les 20 s / 15 m */
-      if(!followRef){ followRef={lat:meLast.lat,lon:meLast.lon}; return; }
-      if(map.distance([followRef.lat,followRef.lon],[meLast.lat,meLast.lon])>=15){
-        followRef=null; window.__speechOpen=true; svOpen();
-      }
+      if(svBox&&svBox.style.display!=='none') return;        /* déjà ouvert : svTick lit au changement de rue */
+      if(window.__streetGo){ window.__streetGo=false; window.__speechOpen=true; svOpen(); }
     }catch(e){}
   },2000);
   function hereAnnounce(){         /* deux vibrations + « Tu es ici », puis le tour de quartier démarre (obligatoire) */
@@ -4802,8 +4849,8 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(!svPend||!svBox||svBox.style.display==='none'||svPos) return;
     var now=Date.now(); if(now-svFT<20000) return;
     try{ if(window.speechSynthesis&&(speechSynthesis.speaking||speechSynthesis.pending)) return; }catch(e){}
-    if(svLast&&map.distance([svLast.lat,svLast.lon],[svPend.lat,svPend.lon])<15) return;
-    var p=svPend; svPend=null; svFT=now; svLast={lat:p.lat,lon:p.lon};
+    if(!window.__streetGo) return;                           /* lecture uniquement après un changement de rue confirmé */
+    var p=svPend; svPend=null; svFT=now; svLast={lat:p.lat,lon:p.lon}; window.__streetGo=false;
     document.getElementById('svFrame').src='https://www.google.com/maps?layer=c&cbll='+p.lat+','+p.lon+'&cbp=12,0,0,0,0&output=svembed';
     document.getElementById('svTxt').textContent='[v7] 📍 '+p.lat.toFixed(4)+', '+p.lon.toFixed(4)+' — 🌍 Analyse du lieu…';
     svReadBoth(p.lat,p.lon,null,true,false);
@@ -5374,8 +5421,10 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
     if(a&&Math.hypot(a.x-ev.containerPoint.x,a.y-ev.containerPoint.y)<=ME_TOUCH_PX) return;
     svOpen(ev.latlng.lat,ev.latlng.lng);
   });
+  var __gfSV=window.makeGpsFilter({maxAcc:60,q:3});
   function onPos(p){
-    var lat=p.coords.latitude, lon=p.coords.longitude, acc=p.coords.accuracy||0;
+    var f=__gfSV(p); if(!f) return;
+    var lat=f.lat, lon=f.lon, acc=p.coords.accuracy||0;
     meLast={lat:lat,lon:lon};
     try{ tourPrefetch(); }catch(e){}
     try{ svFollow(lat,lon); }catch(e){}
@@ -5624,293 +5673,567 @@ function dBuild(lat,lon,nom,ov,elev,pop,st){
   window.addEventListener('resize',function(){ if(pill.style.display==='block') place(); });
 })();
 </script>
+<style>
+#bar #wkBtn.on{outline:3px solid #fff;filter:brightness(1.15)}
+.wk-pt{width:26px;height:26px;border-radius:50%;background:#fff;border:2px solid #0d1a6e;color:#0d1a6e;font:15px/21px system-ui,sans-serif;text-align:center;box-shadow:0 1px 5px #0009;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+.wk-pt.act{background:#d4af37;transform:scale(1.35);z-index:9999!important}
+#wkSheet{position:fixed;left:8px;right:8px;bottom:calc(8px + env(safe-area-inset-bottom));z-index:3200;display:none;background:#0d1a6eF5;color:#fff;border:1px solid #d4af37;border-radius:16px;padding:12px 14px;max-height:70vh;overflow:auto;box-shadow:0 8px 28px #000a;font-size:14px;line-height:1.5}
+#wkSheet h3{margin:0 28px 6px 0;font-size:17px;color:#d4af37}
+#wkSheet img{float:inline-end;max-width:110px;max-height:110px;border-radius:8px;margin:0 0 6px 10px;object-fit:cover}
+#wkSheet .wkx{position:absolute;top:6px;inset-inline-end:10px;background:none;border:0;color:#fff;font-size:20px;cursor:pointer}
+#wkSheet .wkb{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;clear:both}
+#wkSheet .wkb button,#wkSheet .wkb a{background:#d4af37;color:#0d1a6e;border:0;border-radius:8px;padding:6px 12px;font-weight:700;font-size:13px;text-decoration:none;cursor:pointer}
+#wkToast{position:fixed;left:50%;transform:translateX(-50%);top:calc(64px + env(safe-area-inset-top));z-index:3500;background:#0d1a6eF2;color:#fff;border:1px solid #d4af37;border-radius:12px;padding:6px 12px;font-size:13px;display:none;max-width:calc(100vw - 32px);text-align:center}
+#wkPage{position:fixed;inset:0;z-index:4000;background:#fff;display:none;flex-direction:column}
+#wkPage .wkh{display:flex;align-items:center;gap:8px;background:#0d1a6e;color:#fff;padding:8px 12px;padding-top:calc(8px + env(safe-area-inset-top))}
+#wkPage .wkh b{flex:1;color:#d4af37;font-size:16px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#wkPage .wkh button{background:#d4af37;color:#0d1a6e;border:0;border-radius:8px;padding:6px 12px;font-weight:700;font-size:16px}
+#wkBody{flex:1;overflow:auto;padding:14px 16px calc(24px + env(safe-area-inset-bottom));font:17px/1.7 system-ui,sans-serif;color:#111}
+#wkBody h2,#wkBody h3{color:#0d1a6e;border-bottom:1px solid #d4af37;margin:22px 0 8px}
+#wkBody img{max-width:100%;height:auto}
+#wkBody table{display:block;overflow:auto;max-width:100%;border-collapse:collapse;margin:8px 0}
+#wkBody td,#wkBody th{border:1px solid #ccc;padding:4px 6px;font-size:15px}
+#wkBody .infobox,#wkBody .thumb,#wkBody figure,#wkBody .floatright,#wkBody .floatleft{float:none!important;margin:8px 0;max-width:100%}
+#wkBody sup{font-size:11px;color:#555}
+#wkBody h4{color:#0d1a6e;font-size:19px;margin:20px 0 4px;border-bottom:1px solid #d4af37}
+#wkBody p{margin:0 0 10px}
+#wkSheet h4{color:#d4af37;margin:12px 0 2px}
+#wkSheet p{margin:0 0 8px}
+</style>
+<div id="wkSheet"></div><div id="wkToast"></div>
 <script>
-/* ===== 🦯 Alerte trottoir pour personnes non voyantes =====
-   Zone VERTE  : bande de 1 m sur le trottoir, le long du bord de chaque rue/ruelle (des deux côtés)
-   Zone ROUGE  : la chaussée elle-même, d'un bord à l'autre, + intersections jusqu'à l'autre rive
-   Sons        : bip lent en zone verte -> de plus en plus rapide en approchant du rouge -> très rapide en zone rouge */
+/* ===== ℹ️ Infos sur les lieux, partout dans le monde : tap = résumé lu, appui long = tout lire ===== */
 (function(){
-  if(typeof map==='undefined'||typeof L==='undefined') return;
-  var GREEN_M=1.0, CELL=0.002, POOL=3, TTL=365*86400000;
-  var EP=['https://overpass-api.de/api/interpreter','https://lz4.overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter','https://overpass.openstreetmap.fr/api/interpreter'];
-  var DEF_W={motorway:14,trunk:12,primary:10,secondary:8,tertiary:7,unclassified:6,residential:6,living_street:5,service:3.5,track:3,road:5};
-  var on=false, watchId=null, ac=null, timer=null, me=null, layers=[], pane=null, state='none', dEdge=99, first=false, cells={}, pending={}, visOn=true, hinted=false, lg=L.layerGroup(), readySaid=false, errSaid=0, onSince=0;
-
-  /* ---------- bouton ---------- */
-  var bar=document.getElementById('bar'), btn=document.createElement('button');
-  btn.id='safeBtn'; btn.type='button'; btn.textContent='🦯';
-  btn.title='Alerte trottoir / تنبيه الرصيف'; btn.setAttribute('aria-label','Alerte trottoir : désactivée'); btn.setAttribute('aria-pressed','false');
-  var satB=document.getElementById('sat'); if(bar){ if(satB&&satB.parentNode) satB.parentNode.insertBefore(btn,satB.nextSibling); else bar.appendChild(btn); } else document.body.appendChild(btn);
-  var vb=document.createElement('button'); vb.id='safeVis'; vb.type='button'; vb.textContent='🟩'; vb.title='Zones vertes/rouges'; vb.setAttribute('aria-pressed','true'); vb.setAttribute('aria-label','Zones vertes et rouges : affichées');
-  btn.parentNode.insertBefore(vb,btn.nextSibling); vb.style.outline='3px solid #fff';
-  vb.onclick=function(){ visOn=!visOn; vb.style.outline=visOn?'3px solid #fff':''; vb.setAttribute('aria-pressed',visOn?'true':'false'); vb.setAttribute('aria-label','Zones vertes et rouges : '+(visOn?'affichées':'masquées')); if(visOn){ lg.addTo(map); resize(); loadView(); } else map.removeLayer(lg); };
-  var db=document.createElement('button'); db.id='safeDl'; db.type='button'; db.textContent='📥'; db.title='Télécharger les rues autour de moi (une seule fois)'; db.setAttribute('aria-label','Télécharger les rues du quartier, une seule fois');
-  btn.parentNode.insertBefore(db,vb.nextSibling);
-  db.onclick=function(){ var c=me?{lat:me.lat,lng:me.lon}:map.getCenter(); downloadArea(c.lat,c.lng,2000); };
-  var toast=document.createElement('div');
-  toast.style.cssText='position:fixed;left:50%;transform:translateX(-50%);top:calc(110px + env(safe-area-inset-top));z-index:3600;background:#0d1a6eF2;color:#fff;border:1px solid #d4af37;border-radius:12px;padding:8px 14px;font-size:13px;max-width:calc(100vw - 32px);text-align:center;display:none';
-  document.body.appendChild(toast); var tt=null;
-  var lastMsg='', V='v8';
-  var info_=document.createElement('div'); info_.id='safeInfo';
-  info_.style.cssText='position:fixed;left:10px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:3600;background:#000c;color:#fff;font:700 12px system-ui,sans-serif;padding:6px 10px;border-radius:10px;pointer-events:none;max-width:70vw';
-  document.body.appendChild(info_);
-  function info(){ var z=map.getZoom(), n=0, ok=0, pd=Object.keys(pending).length, fl=0; for(var k in cells){ if(cells[k]&&cells[k].d){ n+=cells[k].d.ways.length; ok++; } else if(cells[k]&&cells[k].fail) fl++; }
-    info_.textContent='🦯 '+V+' · zoom '+z+' · '+n+' rues · '+ok+' zones'+(pd?' · ⏳'+pd:'')+(fl&&!pd?' · ❌ réseau':'')+(dl.on?' · 📥 '+dl.done+'/'+dl.total:'')+(z<14?' · ⚠️ zoomez à 14 ou plus':''); }
-
-  function say(t,ms){ toast.textContent=t; toast.style.display='block'; clearTimeout(tt); tt=setTimeout(function(){toast.style.display='none';},ms||3500);
-    var live=document.getElementById('a11yLive'); if(live) live.textContent=t; }
-  function speak(t,n,t0){ try{ var s_=window.speechSynthesis; if(!s_) return; n=n||0; t0=t0||Date.now();
-    var u=new SpeechSynthesisUtterance(t); u.lang='fr-FR'; u.__ok=true;   /* __ok : passe le filtre global de la synthèse vocale */
-    u.onerror=function(e){ if(on&&n<2&&Date.now()-t0<5000&&e&&(e.error==='canceled'||e.error==='interrupted')) setTimeout(function(){ speak(t,n+1,t0); },300); };   /* coupée par Street View/autre : on relance */
-    s_.speak(u); }catch(e){} }
-
-  /* ---------- géométrie (mètres, repère local autour du centre de chargement) ---------- */
-  function proj(c,la,lo){ return {x:(lo-c.lon)*111320*Math.cos(c.lat*Math.PI/180), y:(la-c.lat)*111320}; }
-  function ptSeg(px,py,a,b){ var dx=b.x-a.x, dy=b.y-a.y, l=dx*dx+dy*dy, t=l?Math.max(0,Math.min(1,((px-a.x)*dx+(py-a.y)*dy)/l)):0, x=a.x+t*dx-px, y=a.y+t*dy-py; return Math.sqrt(x*x+y*y); }
-  function halfW(tags){
-    var w=parseFloat(String(tags.width||'').replace(',','.'));
-    if(!(w>0)){ var ln=parseInt(tags.lanes,10); if(ln>0) w=ln*3.0; }
-    if(!(w>0)) w=DEF_W[tags.highway]||5;
-    return Math.max(1.5,Math.min(w,30))/2;
+  var AR=false; try{ AR=localStorage.getItem('lang_ar')==='1'; }catch(e){}
+  var LG=AR?'ar':'fr', VL=AR?'ar-SA':'fr-FR';
+  var T=AR?{zoom:'قرّب الخريطة لعرض الأماكن',n:' مكان',load:'جارٍ التحميل…',full:'📖 الصفحة كاملة',stop:'⏹ إيقاف',open:'🔗 ويكيبيديا',err:'تعذّر التحميل',rd:'قراءة الصفحة كاملة…',nosum:'لا يوجد ملخص.'}
+           :{zoom:'Zoome pour voir les lieux',n:' lieux',load:'Chargement…',full:'📖 Page entière',stop:'⏹ Stop',open:'🔗 Wikipédia',err:'Échec du chargement',rd:'Lecture de la page entière…',nosum:'Pas de résumé.'};
+  var on=false, pts={}, shown={}, tmr, rid=0, cur=null, actEl=null;
+  var sheet=document.getElementById('wkSheet'), toastEl=document.getElementById('wkToast'), tt;
+  function toast(m,ms){ toastEl.textContent=m; toastEl.style.display='block'; clearTimeout(tt); tt=setTimeout(function(){toastEl.style.display='none';},ms||2500); }
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function api(u){ return fetch(u).then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); }); }
+  var base='https://'+LG+'.wikipedia.org/';
+  /* voix : ses utterances doivent porter __ok sinon l'app les bloque */
+  function stopVoice(){ rid++; try{ speechSynthesis.cancel(); }catch(e){} }
+  function speak(text){
+    stopVoice(); var id=rid, s=window.speechSynthesis; if(!s) return;
+    var parts=(text.replace(/\s+/g,' ').match(/[^.!?؟۔\n]+[.!?؟۔]?\s*/g)||[text]), chunks=[], c='';
+    parts.forEach(function(p){ if((c+p).length>220){ if(c) chunks.push(c); c=p; } else c+=p; }); if(c) chunks.push(c);
+    (function next(i){ if(id!==rid||i>=chunks.length) return;
+      var u=new SpeechSynthesisUtterance(chunks[i]); u.lang=VL; u.rate=.95; u.__ok=true;
+      u.onend=u.onerror=function(){ next(i+1); }; s.speak(u); })(0);
   }
-  /* distance signée au bord de chaussée : <=0 dans la chaussée (rouge), 0..1 m sur le trottoir (vert) */
-  function signed(la,lo){
-    var ci=Math.floor(la/CELL), cj=Math.floor(lo/CELL), best=99, got=false;
-    for(var i=ci-1;i<=ci+1;i++) for(var j=cj-1;j<=cj+1;j++){
-      var c=cells[i+'_'+j]; if(!c||!c.d) continue; got=true; var d0=c.d, p=proj(d0.c,la,lo), x=p.x, y=p.y, a1,b1,w,d,q;
-      for(a1=0;a1<d0.ways.length;a1++){ w=d0.ways[a1]; for(b1=0;b1<w.pts.length-1;b1++){ d=ptSeg(x,y,w.pts[b1],w.pts[b1+1])-w.hw; if(d<best) best=d; } }
-      for(a1=0;a1<d0.junc.length;a1++){ q=d0.junc[a1]; d=Math.sqrt((x-q.x)*(x-q.x)+(y-q.y)*(y-q.y))-q.r; if(d<best) best=d; }
+  function showSheet(p,html,full){
+    sheet.dir=AR?'rtl':'ltr';
+    sheet.innerHTML='<button class="wkx" aria-label="close">✕</button><h3>'+esc(p.title)+'</h3>'+html+
+      '<div class="wkb"><button class="wks">'+T.stop+'</button>'+(full?'':'<button class="wkf">'+T.full+'</button>')+'</div>';
+    sheet.style.display='block';
+    sheet.querySelector('.wkx').onclick=function(){ stopVoice(); sheet.style.display='none'; setAct(null); };
+    sheet.querySelector('.wks').onclick=stopVoice;
+    var f=sheet.querySelector('.wkf'); if(f) f.onclick=function(){ readFull(p); };
+  }
+  function setAct(el){ if(actEl) actEl.classList.remove('act'); actEl=el; if(el) el.classList.add('act'); }
+  var BAD=/^(notes?( et références)?|références?|voir aussi|liens? externes?|bibliographie|annexes?|articles? connexes?|sources?|see also|references|external links|ملاحظات|مراجع|انظر أيضا|وصلات خارجية|هوامش|المصادر)$/i;
+  function parse(tx){ var skip=false, bl=[], sp=[];
+    tx.replace(/\r/g,'').split('\n').forEach(function(l){ var m=l.match(/^(=+)\s*(.*?)\s*=+$/);
+      if(m){ skip=BAD.test(m[2]); if(!skip){ bl.push({h:1,t:m[2]}); sp.push(m[2]+'.'); } }
+      else if(!skip&&l.trim()){ bl.push({t:l}); sp.push(l); } });
+    return {html:bl.map(function(x){ return x.h?'<h4>'+esc(x.t)+'</h4>':'<p>'+esc(x.t)+'</p>'; }).join(''), speech:sp.join(' ')}; }
+  function getText(p,intro){
+    return api(base+'w/api.php?action=query&prop=extracts&explaintext=1&exsectionformat=wiki'+(intro?'&exintro=1':'')+'&pageids='+p.id+'&format=json&origin=*')
+      .then(function(j){ var q=j.query.pages[p.id]; return (q&&q.extract)||''; }); }
+  function summarize(tx){ var skip=false, out=[], got=false, len=0, intro=true;
+    tx.replace(/\r/g,'').split('\n').forEach(function(l){ var m=l.match(/^(=+)\s*(.*?)\s*=+$/);
+      if(m){ skip=BAD.test(m[2]); intro=false; got=false; if(!skip) out.push('='+m[2]+'='); return; }
+      if(skip||!l.trim()) return;
+      if(intro||!got){ out.push(l); len+=l.length; if(!intro) got=true; } });
+    /* retire les titres sans paragraphe, limite la longueur */
+    var res=[], tot=0; out.forEach(function(x,i){ if(x[0]==='='&&x.slice(-1)==='='){ if(i+1<out.length&&!(out[i+1][0]==='='&&out[i+1].slice(-1)==='=')) res.push('== '+x.slice(1,-1)+' =='); } else if(tot<4500){ res.push(x); tot+=x.length; } });
+    return res.join('\n'); }
+  function readSummary(p){
+    stopVoice(); cur=p; showSheet(p,'<p>'+T.load+'</p>',false);
+    getText(p,false).then(function(tx){
+      if(cur!==p) return; var r=parse(summarize(tx)||T.nosum);
+      showSheet(p,r.html,false); speak(p.title+'. '+r.speech);
+    }).catch(function(){ if(cur===p) showSheet(p,'<p>'+T.err+'</p>',false); });
+  }
+  function getFull(p){
+    return api(base+'w/api.php?action=parse&pageid='+p.id+'&prop=text&format=json&formatversion=2&origin=*').then(function(j){
+      var d=new DOMParser().parseFromString(j.parse.text,'text/html'), root=d.querySelector('.mw-parser-output')||d.body;
+      root.querySelectorAll('script,style,link,meta,.mw-editsection,.noprint,.mw-empty-elt').forEach(function(n){ n.remove(); });
+      root.querySelectorAll('a').forEach(function(a){ var s=d.createElement('span'); while(a.firstChild) s.appendChild(a.firstChild); a.replaceWith(s); });
+      root.querySelectorAll('img').forEach(function(i){ var s=i.getAttribute('src')||''; if(s.indexOf('//')===0) s='https:'+s; i.setAttribute('src',s); i.removeAttribute('srcset'); i.removeAttribute('width'); i.removeAttribute('height'); i.setAttribute('loading','lazy'); });
+      root.querySelectorAll('[style]').forEach(function(n){ n.removeAttribute('style'); });
+      var sp=[], rc=root.cloneNode(true);
+      rc.querySelectorAll('sup,table').forEach(function(n){ n.remove(); });
+      rc.querySelectorAll('h2,h3,h4,p,li,dd').forEach(function(n){ if(/^LI$/.test(n.tagName)&&n.querySelector('li')) return;
+        var t=n.textContent.replace(/\s+/g,' ').trim(); if(t) sp.push(/^H/.test(n.tagName)?t+'.':t); });
+      return {html:root.innerHTML, speech:sp.join(' ')}; });
+  }
+  var pg=document.createElement('div'); pg.id='wkPage';
+  pg.innerHTML='<div class="wkh"><b></b><button class="wkv">🔊</button><button class="wks2">⏹</button><button class="wkc">✕</button></div><div id="wkBody"></div>';
+  document.body.appendChild(pg);
+  var pgT=pg.querySelector('b'), pgB=pg.querySelector('#wkBody'); pg.dir=AR?'rtl':'ltr';
+  pg.querySelector('.wkc').onclick=function(){ stopVoice(); pg.style.display='none'; pgB.innerHTML=''; setAct(null); };
+  pg.querySelector('.wks2').onclick=stopVoice;
+  function readFull(p){
+    stopVoice(); cur=p; sheet.style.display='none'; pg.style.display='flex'; pgT.textContent=p.title; pgB.innerHTML='<p>'+T.load+'</p>'; pgB.scrollTop=0;
+    var sp='';
+    pg.querySelector('.wkv').onclick=function(){ if(sp) speak(p.title+'. '+sp); };
+    getFull(p).catch(function(){ return getText(p,false).then(function(tx){ return parse(tx||T.nosum); }); }).then(function(r){
+      if(cur!==p) return; sp=r.speech; pgB.innerHTML=r.html||'<p>'+T.nosum+'</p>'; speak(p.title+'. '+sp);
+    }).catch(function(){ if(cur===p) pgB.innerHTML='<p>'+T.err+'</p>'; });
+  }
+  function addMarker(p){
+    var m=L.marker([p.lat,p.lon],{icon:L.divIcon({className:'',html:'<div class="wk-pt">ℹ️</div>',iconSize:[26,26],iconAnchor:[13,13]}),keyboard:false,zIndexOffset:500});
+    m.addTo(map); var el=m.getElement(), d=el.firstChild, timer, lp=false, sx=0, sy=0;
+    function clr(){ clearTimeout(timer); }
+    el.addEventListener('contextmenu',function(e){ e.preventDefault(); });
+    el.addEventListener('pointerdown',function(e){ lp=false; sx=e.clientX; sy=e.clientY; clr();
+      timer=setTimeout(function(){ lp=true; try{navigator.vibrate&&navigator.vibrate(60);}catch(x){} setAct(d); readFull(p); },600); });
+    el.addEventListener('pointermove',function(e){ if(Math.abs(e.clientX-sx)+Math.abs(e.clientY-sy)>10) clr(); });
+    el.addEventListener('pointerup',clr); el.addEventListener('pointercancel',clr); el.addEventListener('pointerleave',clr);
+    m.on('click',function(){ if(lp){ lp=false; return; } setAct(d); readSummary(p); });
+    return m;
+  }
+  var done={}, queue=[], active=0, rt, MAXQ=300, MAXM=800;
+  function render(){
+    var bd=map.getBounds().pad(.25), c=map.getCenter(), arr=[];
+    Object.keys(pts).forEach(function(k){ var p=pts[k]; if(bd.contains([p.lat,p.lon])) arr.push([Math.abs(p.lat-c.lat)+Math.abs(p.lon-c.lng),k]); });
+    arr.sort(function(x,y){return x[0]-y[0];}); var want={};
+    arr.slice(0,MAXM).forEach(function(x){ want[x[1]]=1; });
+    Object.keys(shown).forEach(function(k){ if(!want[k]){ map.removeLayer(shown[k]); delete shown[k]; } });
+    Object.keys(want).forEach(function(k){ if(!shown[k]) shown[k]=addMarker(pts[k]); });
+  }
+  function schedRender(){ clearTimeout(rt); rt=setTimeout(function(){ if(on){ render(); toast('ℹ️ '+Object.keys(pts).length+T.n,1200); } },300); }
+  function fetchTile(t){
+    var s=t.s, lat=(t.j+.5)*s, lon=(t.i+.5)*s, r=Math.min(10000,Math.ceil(s*111320*.75));
+    return api(base+'w/api.php?action=query&list=geosearch&gscoord='+lat+'%7C'+lon+'&gsradius='+r+'&gslimit=500&format=json&origin=*').then(function(j){
+      var g=(j.query&&j.query.geosearch)||[];
+      g.forEach(function(x){ pts[x.pageid]={id:x.pageid,title:x.title,lat:x.lat,lon:x.lon}; });
+      if(g.length>=500&&s>0.04){ [0,1].forEach(function(a){[0,1].forEach(function(b){ var n={s:s/2,i:t.i*2+a,j:t.j*2+b},k=n.s+':'+n.i+':'+n.j; if(!done[k]){ done[k]=1; queue.unshift(n); } }); }); }
+    }).catch(function(){ delete done[t.s+':'+t.i+':'+t.j]; });
+  }
+  function pump(){
+    while(on&&active<6&&queue.length){ var t=queue.shift(); active++;
+      fetchTile(t).then(function(){ active--; schedRender(); pump(); }); }
+  }
+  function load(){
+    if(!on) return;
+    var b=map.getBounds(), c=map.getCenter(), s=0.1, ic=Math.floor(c.lng/s), jc=Math.floor(c.lat/s), W=20;
+    var i0=Math.max(Math.floor(Math.max(b.getWest(),-180)/s),ic-W), i1=Math.min(Math.floor(Math.min(b.getEast(),180)/s),ic+W);
+    var j0=Math.max(Math.floor(Math.max(b.getSouth(),-90)/s),jc-W), j1=Math.min(Math.floor(Math.min(b.getNorth(),90)/s),jc+W), L=[];
+    for(var i=i0;i<=i1;i++)for(var j=j0;j<=j1;j++){ var k=s+':'+i+':'+j; if(!done[k]) L.push({s:s,i:i,j:j,d:Math.abs(i-ic)+Math.abs(j-jc)}); }
+    L.sort(function(x,y){return x.d-y.d;}); queue=L.slice(0,MAXQ);
+    queue.forEach(function(t){ done[t.s+':'+t.i+':'+t.j]=1; });
+    render(); pump();
+  }
+  function sched(){ clearTimeout(tmr); tmr=setTimeout(load,250); }
+  var btn=document.createElement('button'); btn.id='wkBtn'; btn.textContent='ℹ️'; btn.title='Infos';
+  var bar=document.getElementById('bar'); bar.insertBefore(btn,document.getElementById('st'));
+  btn.onclick=function(){
+    on=!on; btn.classList.toggle('on',on);
+    if(on){ toast('ℹ️ version 9',2500); map.on('moveend',sched); load(); }
+    else { map.off('moveend',sched); stopVoice(); sheet.style.display='none'; Object.keys(shown).forEach(function(k){ map.removeLayer(shown[k]); }); shown={}; setAct(null); }
+  };
+})();
+
+/* ===== TOUR-VILLE : جولة صوتية في المدينة بين المعالم (ويكيبيديا) ===== */
+(function(){
+  if(window.__tourWiki) return; window.__tourWiki=1;
+  if(typeof map==='undefined'||!window.L) return;
+  var $=function(id){return document.getElementById(id);};
+  var X=function(t){return String(t==null?'':t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+  var COUNTRIES=[['tn','تونس'],['dz','الجزائر'],['ma','المغرب'],['ly','ليبيا'],['eg','مصر'],['sa','السعودية'],['ae','الإمارات'],['qa','قطر'],['jo','الأردن'],['lb','لبنان'],['sy','سوريا'],['iq','العراق'],['ps','فلسطين'],['tr','تركيا'],['fr','فرنسا'],['es','إسبانيا'],['it','إيطاليا'],['de','ألمانيا'],['gb','بريطانيا'],['pt','البرتغال'],['nl','هولندا'],['be','بلجيكا'],['ch','سويسرا'],['gr','اليونان'],['us','أمريكا'],['ca','كندا'],['jp','اليابان'],['cn','الصين'],['in','الهند'],['ru','روسيا'],['br','البرازيل'],['mx','المكسيك'],['za','جنوب أفريقيا'],['sn','السنغال']];
+  var PRESETS=[{t:'تونس',c:'tn',q:'Tunis'},{t:'القيروان',c:'tn',q:'Kairouan'},{t:'سوسة',c:'tn',q:'Sousse'},{t:'القاهرة',c:'eg',q:'Cairo'},{t:'باريس',c:'fr',q:'Paris',l:'fr'}];
+  var KW={
+    ar:/مسجد|جامع|قصر|قلعة|قصبة|حصن|باب|برج|متحف|زاوية|ضريح|مقام|سور|معلم|كنيسة|كاتدرائية|مدرسة|سوق|قوس|مسرح|ساحة|رباط|مدرج|حمام|أثر|موقع|آثار|قناطر|نصب|فنار|كنيس|معبد|مدينة عتيقة/,
+    fr:/\b(?:mosqu|palais|forteresse|fort\b|kasbah|porte|tour\b|musée|zaou|mausol|rempart|monument|cath|église|médersa|medersa|souk|arc\b|théâtre|place\b|médina|medina|ribat|amphith|thermes|hammam|site|ruine|citerne|phare|synagogue|édifice|basilique|temple|château|musee)/,
+    en:/\b(?:mosque|palace|fort\b|kasbah|gate|tower|museum|zawiya|mausoleum|wall\b|monument|cathedral|church|madrasa|souk|arch\b|theatre|theater|square|medina|ribat|amphitheat|baths|hammam|site\b|ruin|cistern|lighthouse|synagogue|historic|landmark|basilica|temple|castle)/
+  };
+  var TXT={
+    ar:{vl:'ar-SA',hello:function(c,n){return 'مرحبًا بكم في جولة مدينة '+c+'. سنزور '+n+' معالم.';},stop:function(n){return 'المحطة رقم '+n+'. ';},next:function(d){return 'ننتقل الآن إلى المحطة التالية، على بعد '+d+'. ';},end:'انتهت الجولة. شكرًا لكم.',m:function(x){return x+' متر';},k:function(x){return x+' كيلومتر';}},
+    fr:{vl:'fr-FR',hello:function(c,n){return 'Bienvenue pour la visite de '+c+'. Nous allons voir '+n+' monuments.';},stop:function(n){return 'Étape '+n+'. ';},next:function(d){return 'Direction la prochaine étape, à environ '+d+'. ';},end:'Fin de la visite. Merci.',m:function(x){return x+' mètres';},k:function(x){return x+' kilomètres';}},
+    en:{vl:'en-US',hello:function(c,n){return 'Welcome to the tour of '+c+'. We will visit '+n+' landmarks.';},stop:function(n){return 'Stop '+n+'. ';},next:function(d){return 'Heading to the next stop, about '+d+' away. ';},end:'End of the tour. Thank you.',m:function(x){return x+' meters';},k:function(x){return x+' kilometers';}}
+  };
+
+  /* ---------- CSS ---------- */
+  var st=document.createElement('style'); st.id='tw-css';
+  st.textContent=
+  '#twPanel{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(8px + env(safe-area-inset-bottom));width:min(440px,calc(100vw - 16px));max-height:62vh;overflow:auto;z-index:3300;display:none;direction:rtl;background:#0d1a6eF2;color:#fff;border:1px solid #d4af37;border-radius:16px;padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.5);font:14px system-ui,sans-serif;-webkit-user-select:text;user-select:text}'+
+  '#twPanel .tw-h{display:flex;align-items:center;gap:6px;margin-bottom:8px}#twPanel .tw-h b{flex:1;color:#d4af37;font-size:15px}'+
+  '#twPanel button,#twPanel select{background:#d4af37;color:#0d1a6e;border:0;border-radius:8px;padding:6px 10px;font-weight:700;cursor:pointer;font-size:14px}'+
+  '#twPanel button:disabled{opacity:.5}#twPanel .tw-h button{background:transparent;color:#fff;font-size:18px;padding:2px 8px}'+
+  '#twPanel .tw-r{display:flex;align-items:center;gap:6px;margin:6px 0}#twPanel .tw-r label{width:44px;flex:none;color:#d4af37;font-weight:700}#twPanel .tw-r select{flex:1;min-width:0}'+
+  '#twPanel .tw-f{position:relative;flex:1;display:flex;gap:6px;min-width:0}'+
+  '#twPanel input[type=text]{flex:1;min-width:0;background:#fff;color:#0d1a6e;border:0;border-radius:8px;padding:7px 9px;font-size:16px;direction:auto}'+
+  '#twPanel input[type=checkbox]{width:18px;height:18px;margin:0 0 0 4px}'+
+  '#twPanel .tw-sg{position:absolute;top:100%;right:0;left:0;z-index:5;background:#fff;color:#0d1a6e;border-radius:8px;box-shadow:0 6px 18px #0006;max-height:190px;overflow:auto;display:none;margin-top:2px}'+
+  '#twPanel .tw-it{padding:7px 10px;border-bottom:1px solid #0001;cursor:pointer}#twPanel .tw-it small{display:block;opacity:.65;font-size:11px}'+
+  '#twPanel .tw-ch{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}#twPanel .tw-ch button{background:#ffffff1f;color:#fff;border:1px solid #d4af3788;padding:3px 9px;font-weight:600;font-size:12px}'+
+  '#twSt{font-size:13px;min-height:18px;margin-top:6px}#twSum{color:#d4af37;font-weight:700;margin-top:4px}'+
+  '#twNarr{display:none;margin:8px 0;padding:8px 10px;background:#ffffff14;border-radius:10px;font-size:13px;line-height:1.55;white-space:pre-line;max-height:120px;overflow:auto}#twNarr b{color:#d4af37}'+
+  '#twList{list-style:none;margin:6px 0 0;padding:0}#twList li{display:flex;gap:8px;align-items:center;padding:6px 4px;border-bottom:1px solid #ffffff22;cursor:pointer;border-radius:8px}'+
+  '#twList li.on{background:#d4af3733}#twList .n{flex:none;width:24px;height:24px;border-radius:50%;background:#d4af37;color:#0d1a6e;text-align:center;font:700 13px/24px system-ui,sans-serif}'+
+  '#twList .s .n{background:#1fb35a;color:#fff}#twList .e .n{background:#e02424;color:#fff}#twList small{display:block;opacity:.7;font-size:11px}'+
+  '.tw-n{width:28px;height:28px;border-radius:50%;background:#d4af37;color:#0d1a6e;border:3px solid #0d1a6e;box-shadow:0 0 0 2px #d4af37,0 2px 6px #000a;font:800 13px/22px system-ui,sans-serif;text-align:center}'+
+  '.tw-n.l{font-size:10px}.tw-n.s{background:#1fb35a;color:#fff;box-shadow:0 0 0 2px #1fb35a,0 2px 6px #000a}.tw-n.e{background:#e02424;color:#fff;box-shadow:0 0 0 2px #e02424,0 2px 6px #000a}'+
+  '.tw-pop{direction:rtl;font:13px/1.45 system-ui,sans-serif;min-width:190px;color:#111}.tw-pop img{width:100%;max-height:130px;object-fit:cover;border-radius:8px;margin-bottom:6px}'+
+  '.tw-pop b{color:#0d1a6e;font-size:14px}.tw-pop .d{opacity:.7;font-size:12px}.tw-pop .a{display:flex;gap:12px;margin-top:5px}.tw-pop .a a{color:#1a56db;font-weight:700;text-decoration:none}';
+  document.head.appendChild(st);
+
+  /* ---------- DOM ---------- */
+  var panel=document.createElement('div'); panel.id='twPanel';
+  panel.innerHTML=
+   '<div class="tw-h"><b>🏛️ جولة صوتية: كل ويكيبيديا في المدينة</b><button id="twCfg" aria-label="الإعدادات" style="display:none">⚙️</button><button id="twX" aria-label="إغلاق">✕</button></div>'+
+   '<div id="twForm">'+
+   '<div class="tw-r"><label for="twC">البلد</label><select id="twC"></select></div>'+
+   '<div class="tw-r"><label for="twCity">المدينة</label><div class="tw-f"><input type="text" id="twCity" placeholder="اكتب اسم المدينة…" autocomplete="off"><button id="twMe" title="موقعي" aria-label="موقعي">📍</button><div class="tw-sg" id="twSg"></div></div></div>'+
+   '<div class="tw-r"><select id="twLang" aria-label="اللغة"><option value="ar">🔊 العربية</option><option value="fr">🔊 Français</option><option value="en">🔊 English</option></select><select id="twMode"><option value="foot">🚶 مشيًا</option><option value="car">🚗 بالسيارة</option></select></div>'+
+   '<div class="tw-ch" id="twCh"></div>'+
+   '</div>'+
+   '<div class="tw-r"><button id="twGo" style="flex:1">▶ ابدأ جولة المدينة</button></div>'+
+   '<div id="twSt" role="status"></div><div id="twSum"></div><div id="twNarr" aria-live="polite"></div>'+
+   '<div class="tw-r" id="twCtl" style="display:none"><button id="twPrev" aria-label="السابق">⏮</button><button id="twPause" style="flex:1">⏸ إيقاف مؤقت</button><button id="twNext" aria-label="التالي">⏭</button><button id="twStop" aria-label="إنهاء">⏹</button><label style="width:auto;color:#fff;font-weight:400;white-space:nowrap"><input type="checkbox" id="twAuto" checked>تلقائي</label></div>'+
+   '<ol id="twList"></ol>';
+  document.body.appendChild(panel);
+  if(L.DomEvent){ L.DomEvent.disableClickPropagation(panel); L.DomEvent.disableScrollPropagation(panel); }
+  var cs=$('twC'); COUNTRIES.forEach(function(c){ var o=document.createElement('option'); o.value=c[0]; o.textContent=c[1]; cs.appendChild(o); });
+
+  var btn=document.createElement('button'); btn.id='twBtn'; btn.title='جولة صوتية في المدينة'; btn.setAttribute('aria-label','جولة صوتية في المدينة'); btn.textContent='🏛️';
+  var bar=$('bar'), sat=$('sat'); if(bar){ if(sat&&sat.parentNode===bar) bar.insertBefore(btn,sat); else bar.appendChild(btn); } else document.body.appendChild(btn);
+
+  var S={city:null,stops:[],legs:[],mk:[],busy:false,layer:L.layerGroup().addTo(map),cache:{},lang:'ar',mode:'foot'};
+  var T={on:false,paused:false,i:-1,tok:0,u:null};
+
+  /* ---------- outils ---------- */
+  function hav(a,b){var R=6371000,r=Math.PI/180,dl=(b.lat-a.lat)*r,dn=(b.lon-a.lon)*r,x=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dn/2)*Math.sin(dn/2);return 2*R*Math.asin(Math.sqrt(x));}
+  function fd(m){return m<1000?Math.round(m)+' م':(m/1000).toFixed(1)+' كم';}
+  function ft(s){var m=Math.max(1,Math.round(s/60));return m<60?m+' د':Math.floor(m/60)+' س '+(m%60)+' د';}
+  function sd(m,l){ var t=TXT[l]; return m<1000?t.m(Math.max(10,Math.round(m/10)*10)):t.k((m/1000).toFixed(1)); }
+  function say(t){$('twSt').textContent=t||'';}
+  function api(lang,p){
+    var q=['format=json','origin=*']; for(var k in p) q.push(k+'='+encodeURIComponent(p[k]));
+    return fetch('https://'+lang+'.wikipedia.org/w/api.php?'+q.join('&')).then(function(r){ if(!r.ok) throw new Error('ويكيبيديا غير متاحة'); return r.json(); });
+  }
+  function wikiUrl(s){ return 'https://'+s.lang+'.wikipedia.org/wiki/'+encodeURIComponent(String(s.title).replace(/ /g,'_')); }
+
+  /* ---------- المدينة (Nominatim) ---------- */
+  function nom(q,cc,lang,ft){
+    var u='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language='+lang+(cc?'&countrycodes='+cc:'')+(ft?'&featuretype=city':'')+'&q='+encodeURIComponent(q);
+    return fetch(u).then(function(r){ if(!r.ok) throw new Error('البحث عن المدينة غير متاح'); return r.json(); });
+  }
+  function cities(q){
+    var cc=$('twC').value, lang=$('twLang').value;
+    return nom(q,cc,lang,true).then(function(a){ return a.length?a:nom(q,cc,lang,false); }).then(function(a){
+      return a.map(function(x){
+        var bb=(x.boundingbox||[]).map(Number), nm=String(x.display_name||x.name||q).split(',');
+        return {name:(x.name||nm[0]).trim(),full:nm.slice(0,3).join('،'),lat:+x.lat,lon:+x.lon,bb:bb};
+      });
+    });
+  }
+  function resolveCity(){
+    if(S.city) return Promise.resolve(S.city);
+    var q=$('twCity').value.trim();
+    if(!q) return Promise.reject(new Error('اكتب اسم المدينة'));
+    return cities(q).then(function(l){
+      if(!l.length) throw new Error('لم أجد المدينة: '+q);
+      S.city=l[0]; $('twCity').value=l[0].name; return l[0];
+    });
+  }
+  (function(){
+    var inp=$('twCity'), box=$('twSg'), tm=0;
+    inp.addEventListener('input',function(){
+      S.city=null; clearTimeout(tm); var q=inp.value.trim();
+      if(q.length<2){ box.style.display='none'; return; }
+      tm=setTimeout(function(){
+        cities(q).then(function(list){
+          if(inp.value.trim()!==q) return;
+          box.innerHTML='';
+          list.forEach(function(p){
+            var d=document.createElement('div'); d.className='tw-it';
+            d.innerHTML='<b>'+X(p.name)+'</b><small>'+X(p.full)+'</small>';
+            d.addEventListener('click',function(){ S.city=p; inp.value=p.name; box.style.display='none'; });
+            box.appendChild(d);
+          });
+          box.style.display=list.length?'block':'none';
+        }).catch(function(){ box.style.display='none'; });
+      },600);
+    });
+    inp.addEventListener('blur',function(){ setTimeout(function(){ box.style.display='none'; },250); });
+    $('twC').addEventListener('change',function(){ S.city=null; inp.value=''; });
+  })();
+
+  /* ---------- المعالم (ويكيبيديا) ---------- */
+  function geo(lang,lat,lon,rad){
+    return api(lang,{action:'query',generator:'geosearch',ggscoord:lat+'|'+lon,ggsradius:Math.min(10000,Math.max(10,Math.round(rad))),ggslimit:50,ggsnamespace:0,prop:'coordinates|pageimages|description|pageprops',ppprop:'wikibase_item',piprop:'thumbnail',pithumbsize:260,pilimit:'max',colimit:'max'}).then(function(j){
+      var pg=(j.query&&j.query.pages)||{}, out=[];
+      Object.keys(pg).forEach(function(k){ var p=pg[k]; if(p.coordinates&&p.coordinates.length) out.push({id:p.pageid,title:p.title,desc:p.description||'',thumb:p.thumbnail?p.thumbnail.source:null,qid:(p.pageprops&&p.pageprops.wikibase_item)||null,lat:p.coordinates[0].lat,lon:p.coordinates[0].lon,lang:lang}); });
+      return out;
+    }).catch(function(){return [];});
+  }
+  function cityBox(c){
+    var ky=110540, kx=111320*Math.cos(c.lat*Math.PI/180), hx=3000, hy=3000, cy=c.lat, cx=c.lon;
+    if(c.bb&&c.bb.length===4&&isFinite(c.bb[0])){
+      hy=(c.bb[1]-c.bb[0])*ky/2; hx=(c.bb[3]-c.bb[2])*kx/2; cy=(c.bb[0]+c.bb[1])/2; cx=(c.bb[2]+c.bb[3])/2;
+      hx=Math.max(1200,Math.min(8000,hx)); hy=Math.max(1200,Math.min(8000,hy));
     }
-    return got?best:null;
+    return {s:cy-hy/ky,n:cy+hy/ky,w:cx-hx/kx,e:cx+hx/kx};
+  }
+  /* مسح المدينة بالكامل: شبكة تتقسم تلقائيًا كلما امتلأت الخانة (حد ويكيبيديا 50 نتيجة) */
+  function scan(langs,box,progress){
+    var out=[], queue=[], active=0, reqs=0, MAX=300;
+    var ky=110540, kx=111320*Math.cos((box.s+box.n)/2*Math.PI/180);
+    var nx=Math.max(1,Math.ceil((box.e-box.w)*kx/2500)), ny=Math.max(1,Math.ceil((box.n-box.s)*ky/2500));
+    for(var i=0;i<nx;i++) for(var j=0;j<ny;j++) queue.push({s:box.s+(box.n-box.s)*j/ny,n:box.s+(box.n-box.s)*(j+1)/ny,w:box.w+(box.e-box.w)*i/nx,e:box.w+(box.e-box.w)*(i+1)/nx});
+    return new Promise(function(res){
+      function pump(){
+        while(active<5&&queue.length&&reqs<MAX){ active++; reqs++; cell(queue.shift()); }
+        if(!active&&(!queue.length||reqs>=MAX)) res(out);
+      }
+      function cell(b){
+        var cy=(b.s+b.n)/2, cx=(b.w+b.e)/2, h=hav({lat:b.s,lon:b.w},{lat:b.n,lon:b.e})/2;
+        Promise.all(langs.map(function(l){return geo(l,cy,cx,Math.ceil(h));})).then(function(rs){
+          var full=false; rs.forEach(function(r){ if(r.length>=45) full=true; for(var k=0;k<r.length;k++) out.push(r[k]); });
+          if(full&&h>120){
+            queue.push({s:b.s,n:cy,w:b.w,e:cx},{s:b.s,n:cy,w:cx,e:b.e},{s:cy,n:b.n,w:b.w,e:cx},{s:cy,n:b.n,w:cx,e:b.e});
+          }
+        }).then(function(){ active--; if(progress) progress(reqs,out.length); pump(); });
+      }
+      pump();
+    });
+  }
+  function merge(items,box,lang,langs){
+    var pad=0.002, seen={}, out=[];
+    items.sort(function(a,b){return langs.indexOf(a.lang)-langs.indexOf(b.lang);});
+    items.forEach(function(p){
+      if(p.lat<box.s-pad||p.lat>box.n+pad||p.lon<box.w-pad||p.lon>box.e+pad) return;
+      var k=p.qid||(p.lang+'|'+p.id); if(seen[k]) return; seen[k]=1; out.push(p);
+    });
+    return out;
+  }
+  function order(pts){
+    var n=pts.length; if(n<3) return pts.slice();
+    var D=[],i,j; for(i=0;i<n;i++) D.push(new Float64Array(n));
+    for(i=0;i<n;i++) for(j=i+1;j<n;j++){ D[i][j]=D[j][i]=hav(pts[i],pts[j]); }
+    function nn(s){
+      var used=new Uint8Array(n),p=[s],l=0; used[s]=1;
+      for(var k=1;k<n;k++){
+        var last=p[k-1],bj=-1,bd=1e18;
+        for(var q=0;q<n;q++){ if(!used[q]&&D[last][q]<bd){bd=D[last][q];bj=q;} }
+        p.push(bj); used[bj]=1; l+=bd;
+      }
+      return {p:p,l:l};
+    }
+    var st=[0],mnLa=0,mxLa=0,mnLo=0,mxLo=0;
+    for(i=1;i<n;i++){ if(pts[i].lat<pts[mnLa].lat)mnLa=i; if(pts[i].lat>pts[mxLa].lat)mxLa=i; if(pts[i].lon<pts[mnLo].lon)mnLo=i; if(pts[i].lon>pts[mxLo].lon)mxLo=i; }
+    st.push(mnLa,mxLa,mnLo,mxLo);
+    var best=null; st.forEach(function(s0){ var r=nn(s0); if(!best||r.l<best.l) best=r; });
+    var p=best.p, imp=true, pass=0;
+    while(imp&&pass++<60){
+      imp=false;
+      for(i=0;i<n-1;i++) for(j=i+1;j<n;j++){
+        var a=i>0?D[p[i-1]][p[i]]:0, b=j<n-1?D[p[j]][p[j+1]]:0, a2=i>0?D[p[i-1]][p[j]]:0, b2=j<n-1?D[p[i]][p[j+1]]:0;
+        if(a2+b2<a+b-1e-6){ var x=p.slice(i,j+1).reverse(); for(var m=0;m<x.length;m++) p[i+m]=x[m]; imp=true; }
+      }
+    }
+    return p.map(function(k){return pts[k];});
   }
 
+  /* ---------- مسار (مقسّم إلى أجزاء) ---------- */
+  function route(stops,mode){
+    var base=mode==='car'?'https://routing.openstreetmap.de/routed-car/route/v1/driving/':'https://routing.openstreetmap.de/routed-foot/route/v1/foot/';
+    var CH=40, jobs=[];
+    for(var a=0;a<stops.length-1;a+=CH-1) jobs.push(stops.slice(a,Math.min(stops.length,a+CH)));
+    if(!jobs.length) return Promise.resolve({ll:stops.map(function(s){return [s.lat,s.lon];}),dist:0,dur:0,real:true,legs:[]});
+    function fallback(js){
+      var dist=0,legs=[]; for(var i=1;i<js.length;i++){ var d=hav(js[i-1],js[i])*1.3; legs.push(d); dist+=d; }
+      return {ll:js.map(function(s){return [s.lat,s.lon];}),dist:dist,dur:dist/(mode==='car'?8:1.3),real:false,legs:legs};
+    }
+    function one(js){
+      var co=js.map(function(s){return s.lon+','+s.lat;}).join(';');
+      return fetch(base+co+'?overview=full&geometries=geojson').then(function(r){ if(!r.ok) throw 0; return r.json(); }).then(function(j){
+        var rt=j.routes&&j.routes[0]; if(!rt) throw 0;
+        var legs=(rt.legs||[]).map(function(l){return l.distance;}); if(legs.length!==js.length-1) throw 0;
+        return {ll:rt.geometry.coordinates.map(function(c){return [c[1],c[0]];}),dist:rt.distance,dur:rt.duration,real:true,legs:legs};
+      }).catch(function(){ return fallback(js); });
+    }
+    return new Promise(function(done){
+      var res=new Array(jobs.length), next=0, act=0, fin=0;
+      function pump(){
+        while(act<3&&next<jobs.length){
+          (function(idx){ act++; one(jobs[idx]).then(function(r){
+            res[idx]=r; act--; fin++;
+            if(fin===jobs.length){
+              var o={ll:[],dist:0,dur:0,real:true,legs:[]};
+              res.forEach(function(r2){ o.ll=o.ll.concat(r2.ll); o.dist+=r2.dist; o.dur+=r2.dur; o.legs=o.legs.concat(r2.legs); if(!r2.real) o.real=false; });
+              done(o);
+            } else pump();
+          }); })(next++);
+        }
+      }
+      pump();
+    });
+  }
 
-  /* ---------- chargement des rues (OpenStreetMap / Overpass) : petites zones, en parallèle, avec mémoire ---------- */
-  var rot=0, BAD=/^(footway|path|steps|cycleway|pedestrian|corridor|bridleway|elevator|proximity|construction|raceway|platform)$/;
-  /* 2e source, autre infrastructure que Overpass : l'API principale d'OpenStreetMap (CORS ouvert) */
-  function osmApi(S,W,N,E){
-    return fetch('https://api.openstreetmap.org/api/0.6/map.json?bbox='+W+','+S+','+E+','+N,{signal:(function(){ var c=new AbortController(); setTimeout(function(){ c.abort(); },25000); return c.signal; })()})
-      .then(function(r){ if(!r.ok) throw 0; return r.json(); })
-      .then(function(j){
-        var nm={}, out=[]; (j.elements||[]).forEach(function(e){ if(e.type==='node') nm[e.id]={lat:e.lat,lon:e.lon}; });
-        (j.elements||[]).forEach(function(e){
-          if(e.type!=='way'||!e.tags||!e.tags.highway||BAD.test(e.tags.highway)||e.tags.area==='yes'||e.tags.tunnel==='yes') return;
-          var g=[], ok=true; (e.nodes||[]).forEach(function(id){ if(nm[id]) g.push(nm[id]); else ok=false; });
-          if(ok&&g.length>1) out.push({nodes:e.nodes,geometry:g,tags:e.tags});
+  /* ---------- ملخص ويكيبيديا ---------- */
+  function getSummary(s){
+    var key=s.lang+'|'+s.title; if(S.cache[key]) return Promise.resolve(S.cache[key]);
+    return fetch('https://'+s.lang+'.wikipedia.org/api/rest_v1/page/summary/'+encodeURIComponent(String(s.title).replace(/ /g,'_'))).then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(j){ S.cache[key]=j; return j; }).catch(function(){ return {}; });
+  }
+  function clean(ex,max){
+    ex=String(ex||'').replace(/\([^)]*\)|（[^）]*）|\[[^\]]*\]/g,' ').replace(/\s+/g,' ').trim();
+    var ss=ex.match(/[^.!?؟]+[.!?؟]+\s*/g)||[ex], out='';
+    for(var i=0;i<ss.length&&i<5;i++){ if(out&&(out+ss[i]).length>max) break; out+=ss[i]; }
+    return out.trim();
+  }
+
+  /* ---------- الصوت ---------- */
+  function voiceFor(l){
+    var vs=(window.speechSynthesis&&speechSynthesis.getVoices&&speechSynthesis.getVoices())||[];
+    for(var i=0;i<vs.length;i++) if((vs[i].lang||'').toLowerCase().indexOf(l)===0) return vs[i];
+    return vs.length?null:undefined;
+  }
+  function speakP(text,tok,lang){ lang=lang||S.lang;
+    return new Promise(function(res){
+      text=String(text||'').trim();
+      var syn=window.speechSynthesis;
+      if(!text||!syn||!window.SpeechSynthesisUtterance){ setTimeout(res,Math.max(3000,text.length*55)); return; }
+      var chunks=[],cur='';
+      (text.match(/[^.!?؟\n]+[.!?؟]*/g)||[text]).forEach(function(s){ if(cur&&(cur+s).length>180){ chunks.push(cur); cur=''; } cur+=s; });
+      if(cur) chunks.push(cur);
+      var k=0, v=voiceFor(lang.slice(0,2));
+      if(v===null&&!S.warned){ S.warned=1; say('⚠️ لا يوجد صوت لهذه اللغة في جهازك — النص معروض أدناه'); }
+      (function next(){
+        if(tok!==T.tok||k>=chunks.length){ res(); return; }
+        var u=new SpeechSynthesisUtterance(chunks[k++]), done=false, wd;
+        u.__ok=true; u.lang=TXT[lang].vl; if(v) u.voice=v; u.rate=0.95; T.u=u;
+        function fin(){ if(done) return; done=true; clearTimeout(wd); next(); }
+        u.onend=fin; u.onerror=fin;
+        wd=setTimeout(fin,Math.max(6000,u.text.length*140));
+        try{ syn.speak(u); }catch(e){ fin(); }
+      })();
+    });
+  }
+  function hush(){ try{ window.speechSynthesis&&speechSynthesis.cancel(); }catch(e){} }
+
+  /* ---------- رسم ---------- */
+  function popEl(s,i){
+    var el=document.createElement('div'); el.className='tw-pop';
+    el.innerHTML=(s.thumb?'<img src="'+X(s.thumb)+'" alt="">':'')+'<b>'+(i+1)+'. '+X(s.title)+'</b>'+(s.desc?'<div class="d">'+X(s.desc)+'</div>':'')+
+      '<div class="a"><a target="_blank" rel="noopener" href="'+X(wikiUrl(s))+'">ويكيبيديا ↗</a><a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination='+s.lat+','+s.lon+'&travelmode=walking">🧭 الاتجاهات</a></div>';
+    return el;
+  }
+  function clear(){
+    S.layer.clearLayers(); S.stops=[]; S.mk=[]; S.legs=[];
+    $('twList').innerHTML=''; $('twSum').textContent=''; $('twNarr').style.display='none'; $('twCtl').style.display='none';
+  }
+  function mark(i){
+    Array.prototype.forEach.call($('twList').children,function(li,k){ li.classList.toggle('on',k===i); });
+    var li=$('twList').children[i]; if(li&&li.scrollIntoView) li.scrollIntoView({block:'nearest'});
+  }
+  function focus(i){
+    var m=S.mk[i]; if(!m) return;
+    map.setView(m.getLatLng(),Math.max(map.getZoom(),17),{animate:true}); m.openPopup(); mark(i);
+  }
+  function draw(c,stops,r,mode){
+    clear(); S.stops=stops; S.legs=r.legs;
+    if(r.ll.length>1){ L.polyline(r.ll,{color:'#0d1a6e',weight:9,opacity:.65}).addTo(S.layer);
+    L.polyline(r.ll,{color:'#d4af37',weight:5,opacity:1,dashArray:r.real?null:'8 8'}).addTo(S.layer); }
+    var ol=$('twList');
+    stops.forEach(function(s,i){
+      var cls=i===0?' s':(i===stops.length-1?' e':'');
+      var m=L.marker([s.lat,s.lon],{icon:L.divIcon({className:'',html:'<div class="tw-n'+cls+(i>98?' l':'')+'">'+(i+1)+'</div>',iconSize:[28,28],iconAnchor:[14,14]}),zIndexOffset:600}).addTo(S.layer);
+      m.bindPopup(popEl(s,i),{maxWidth:260}); S.mk.push(m);
+      var li=document.createElement('li'); li.className=cls.trim();
+      li.innerHTML='<span class="n">'+(i+1)+'</span><span><b>'+X(s.title)+'</b>'+(s.desc?'<small>'+X(s.desc)+'</small>':'')+'</span>';
+      li.addEventListener('click',function(){ if(S.stops.length) playStop(i); }); ol.appendChild(li);
+    });
+    $('twSum').textContent=(mode==='car'?'🚗 ':'🚶 ')+c.name+' · '+stops.length+' معالم · '+fd(r.dist)+' · '+ft(r.dur)+(r.real?'':' (تقديري)');
+    try{ map.fitBounds(L.latLngBounds(r.ll),{padding:[40,40],maxZoom:17}); }catch(e){}
+  }
+
+  /* ---------- الجولة الصوتية ---------- */
+  function setCtl(){ $('twPause').textContent=T.paused?'▶ متابعة':'⏸ إيقاف مؤقت'; }
+  function playStop(i){
+    hush(); var tok=++T.tok; T.on=true; T.paused=false; T.i=i; setCtl(); $('twCtl').style.display='flex';
+    if(i>=S.stops.length){ finish(tok); return; }
+    var s=S.stops[i], sl=s.lang, L8=TXT[sl]; focus(i);
+    if(S.stops[i+1]) getSummary(S.stops[i+1]);
+    getSummary(s).then(function(j){
+      if(tok!==T.tok) return;
+      var ex=clean(j.extract||s.desc||'',600);
+      var lead=(i>0&&S.legs[i-1]?L8.next(sd(S.legs[i-1],sl)):'')+L8.stop(i+1)+s.title+'. ';
+      var nr=$('twNarr'); nr.style.display='block'; nr.innerHTML='<b>'+(i+1)+'. '+X(s.title)+'</b>\n'+X(ex);
+      return speakP(lead+ex,tok,sl).then(function(){
+        if(tok!==T.tok) return;
+        if(i>=S.stops.length-1){ finish(tok); return; }
+        if($('twAuto').checked) setTimeout(function(){ if(tok===T.tok) playStop(i+1); },1200);
+      });
+    });
+  }
+  function finish(tok){
+    var t=TXT[S.lang].end; $('twNarr').style.display='block'; $('twNarr').textContent=t; say('✅ انتهت الجولة');
+    speakP(t,tok).then(function(){ if(tok===T.tok) T.on=false; });
+  }
+  function stopTour(){ T.tok++; T.on=false; T.paused=false; hush(); setCtl(); }
+
+  /* ---------- تشغيل ---------- */
+  function go(){
+    if(S.busy) return;
+    stopTour(); S.busy=true; S.warned=0; $('twGo').disabled=true; clear();
+    try{ if(window.speechSynthesis&&window.SpeechSynthesisUtterance) (function(){ var u0=new SpeechSynthesisUtterance(''); u0.__ok=true; speechSynthesis.speak(u0); })(); }catch(e){}
+    var lang=$('twLang').value, mode=$('twMode').value; S.lang=lang; S.mode=mode;
+    var langs=[lang].concat(['ar','fr','en'].filter(function(l){return l!==lang;}));
+    say('⏳ البحث عن المدينة…');
+    resolveCity().then(function(c){
+      var box=cityBox(c); say('⏳ مسح المدينة بالكامل في ويكيبيديا…');
+      return scan(langs,box,function(rq,found){ say('⏳ مسح المدينة… '+rq+' منطقة · '+found+' نتيجة'); }).then(function(items){
+        var stops=merge(items,box,lang,langs);
+        if(!stops.length) throw new Error('لا توجد أي صفحة ويكيبيديا في '+c.name);
+        say('⏳ ترتيب '+stops.length+' محطة…');
+        var ord=order(stops); say('⏳ حساب المسار…');
+        return route(ord,mode).then(function(r){
+          draw(c,ord,r,mode); $('twForm').style.display='none'; $('twCfg').style.display='inline-block';
+          var other=ord.some(function(x){return x.lang!==lang;});
+          say(other?'ℹ️ بعض الصفحات غير متوفرة بهذه اللغة فتُقرأ بلغتها الأصلية':'');
+          var tok=++T.tok; T.on=true; var hi=TXT[lang].hello(c.name,ord.length);
+          $('twCtl').style.display='flex'; $('twNarr').style.display='block'; $('twNarr').textContent=hi;
+          speakP(hi,tok,lang).then(function(){ if(tok===T.tok) playStop(0); });
         });
-        return out;
       });
+    }).catch(function(e){ say('⚠️ '+(e&&e.message||'خطأ')); }).then(function(){ S.busy=false; $('twGo').disabled=false; });
   }
-  function ovp(q,n,bb,useApi){
-    var eps=EP; if(n){ eps=[]; for(var x=0;x<n;x++) eps.push(EP[(rot++)%EP.length]); }
-    var total=eps.length+((bb&&useApi)?1:0);
-    /* on interroge plusieurs serveurs en même temps : le premier qui répond gagne */
-    return new Promise(function(ok){
-      var cnt=0, done=false, ctls=[];
-      function win(els){ if(!done){ done=true; ctls.forEach(function(c){ try{c.abort();}catch(e){} }); ok(els); } }
-      function lose(){ if(++cnt===total&&!done) ok(null); }
-      eps.forEach(function(ep){
-        var ctl=new AbortController(); ctls.push(ctl); var to=setTimeout(function(){ ctl.abort(); },18000);
-        fetch(ep,{method:'POST',body:'data='+encodeURIComponent(q),signal:ctl.signal})
-          .then(function(r){ if(!r.ok) throw 0; return r.json(); })
-          .then(function(j){ clearTimeout(to); if(!j||!j.elements) throw 0; win(j.elements); })
-          .catch(function(){ clearTimeout(to); lose(); });
-      });
-      if(bb&&useApi) osmApi(bb[0],bb[1],bb[2],bb[3]).then(win).catch(lose);
-    });
-  }
-  function parse(els,c){
-    var ways=[], cnt={}, nodePos={}, nodeHw={};
-    els.forEach(function(e){
-      if(!e.geometry||e.geometry.length<2) return;
-      var hw=halfW(e.tags||{}), pts=e.geometry.map(function(g){return proj(c,g.lat,g.lon);});
-      ways.push({pts:pts,hw:hw,ll:e.geometry.map(function(g){return [g.lat,g.lon];})});
-      (e.nodes||[]).forEach(function(id,i){ var g=e.geometry[i]; if(!g) return;
-        cnt[id]=(cnt[id]||0)+1; nodePos[id]=g; nodeHw[id]=Math.max(nodeHw[id]||0,hw); });
-    });
-    var junc=[]; Object.keys(cnt).forEach(function(id){ if(cnt[id]>=2){ var g=nodePos[id], p=proj(c,g.lat,g.lon); junc.push({x:p.x,y:p.y,r:nodeHw[id],ll:[g.lat,g.lon]}); } });
-    return {c:c,ways:ways,junc:junc};
-  }
-  function slim(els){ return els.filter(function(e){ return e.geometry&&e.geometry.length>1; }).map(function(e){ var t=e.tags||{};
-    return {nodes:e.nodes,geometry:e.geometry.map(function(g){return {lat:+g.lat.toFixed(6),lon:+g.lon.toFixed(6)};}),tags:{highway:t.highway,width:t.width,lanes:t.lanes}}; }); }
-  var idb=null, mem={};
-  var idbReady=new Promise(function(res){ try{ var r=indexedDB.open('safe6',1); r.onupgradeneeded=function(){ r.result.createObjectStore('c'); }; r.onsuccess=function(){ idb=r.result; res(); }; r.onerror=function(){ res(); }; }catch(e){ res(); } });
-  function cacheGet(k){ return idbReady.then(function(){ return new Promise(function(res){ if(!idb) return res(mem[k]||null);
-    try{ var q=idb.transaction('c').objectStore('c').get(k); q.onsuccess=function(){ var v=q.result; res(v&&Date.now()-v.t<TTL?v.e:null); }; q.onerror=function(){ res(null); }; }catch(e){ res(null); } }); }); }
-  function cachePut(k,els){ var e=slim(els); if(!idb){ mem[k]=e; return; } try{ idb.transaction('c','readwrite').objectStore('c').put({t:Date.now(),e:e},k); }catch(x){} }
-  function qCell(S,W,N,E){ return '[out:json][timeout:20];way["highway"]["highway"!~"footway|path|steps|cycleway|pedestrian|corridor|bridleway|elevator|proximity|construction|raceway|platform"]["area"!="yes"]["tunnel"!="yes"]('+S+','+W+','+N+','+E+');out geom tags;'; }
-
-  /* ---------- dessin : vert (bord + 1 m) puis rouge (chaussée), comme les traits bleus Street View ---------- */
-  function mkStyleG(w){ return {color:'#00e060',opacity:.95,weight:w,lineCap:'round',lineJoin:'round',pane:'safePane',interactive:false}; }
-  function mkStyleR(w){ return {color:'#ff1a1a',opacity:.95,weight:w,lineCap:'round',lineJoin:'round',pane:'safePane',interactive:false}; }
-  function ensurePane(){ if(!pane){ pane=map.createPane('safePane'); pane.style.zIndex=470; pane.style.pointerEvents='none'; lg.addTo(map); } }
-  function mpp(){ return 156543.03392*Math.cos(map.getCenter().lat*Math.PI/180)/Math.pow(2,map.getZoom()); }
-  function resize(){ var m=mpp(); layers.forEach(function(o){ o.l.setStyle({weight:Math.max(o.red?3:6,o.m/m)}); }); }
-  function drawCell(d){
-    ensurePane(); var m=mpp(), i;
-    for(i=0;i<d.ways.length;i++){ var w=d.ways[i], mm=2*w.hw+2*GREEN_M, l1=L.polyline(w.ll,mkStyleG(Math.max(6,mm/m))); lg.addLayer(l1); layers.push({l:l1,m:mm}); }
-    for(i=0;i<d.junc.length;i++){ var j=d.junc[i]; lg.addLayer(L.circle(j.ll,{radius:j.r+GREEN_M,stroke:false,fillColor:'#00e060',fillOpacity:.95,pane:'safePane',interactive:false})); }
-    for(i=0;i<d.ways.length;i++){ var w2=d.ways[i], m2=2*w2.hw, l2=L.polyline(w2.ll,mkStyleR(Math.max(3,m2/m))); lg.addLayer(l2); layers.push({l:l2,m:m2,red:1}); }
-    for(i=0;i<d.junc.length;i++){ var j2=d.junc[i]; lg.addLayer(L.circle(j2.ll,{radius:j2.r,stroke:false,fillColor:'#ff1a1a',fillOpacity:.95,pane:'safePane',interactive:false})); }
-  }
-  function setCell(i,j,els,fromCache){
-    var k=i+'_'+j, S=i*CELL, W=j*CELL, d=parse(els,{lat:S+CELL/2,lon:W+CELL/2});
-    cells[k]={d:d}; if(!fromCache) cachePut(k,els); drawCell(d);
-  }
-  function loadCell(i,j){
-    var k=i+'_'+j; if(cells[k]&&cells[k].d) return Promise.resolve(); if(pending[k]) return Promise.resolve();
-    if(cells[k]&&cells[k].fail&&Date.now()-cells[k].fail<8000) return Promise.resolve();
-    pending[k]=1; info();
-    return cacheGet(k).then(function(c){
-      if(c){ delete pending[k]; setCell(i,j,c,true); info(); checkReady(); return; }
-      var S=i*CELL, W=j*CELL;
-      return ovp(qCell(S,W,S+CELL,W+CELL),0,[S,W,S+CELL,W+CELL],true).then(function(els){
-        delete pending[k];
-        if(!els){ cells[k]={fail:Date.now()}; } else setCell(i,j,els,false);
-        info(); checkReady();
-      });
-    });
-  }
-  function runPool(list){
-    var idx=0; function next(){ if(idx>=list.length) return Promise.resolve(); var t=list[idx++]; return loadCell(t[0],t[1]).then(next); }
-    for(var w=0;w<POOL;w++) next();
-  }
-  /* ---------- 📥 téléchargement unique d'un quartier (ensuite : plus besoin d'Internet) ---------- */
-  var dl={on:false,total:0,done:0,stop:false};
-  function fetchStore(i,j,att){
-    var k=i+'_'+j;
-    return cacheGet(k).then(function(c){ if(c) return true;
-      var S=i*CELL, W=j*CELL; return ovp(qCell(S,W,S+CELL,W+CELL),2,[S,W,S+CELL,W+CELL],(att||0)>=2).then(function(els){ if(!els) return false; cachePut(k,els); return true; }); });
-  }
-  function downloadArea(la,lo,radM){
-    if(dl.on){ dl.stop=true; say('📥 Téléchargement arrêté',2500); return; }
-    var dLat=radM/111320, dLon=radM/(111320*Math.cos(la*Math.PI/180)), list=[];
-    for(var i=Math.floor((la-dLat)/CELL);i<=Math.floor((la+dLat)/CELL);i++) for(var j=Math.floor((lo-dLon)/CELL);j<=Math.floor((lo+dLon)/CELL);j++){
-      var cla=(i+.5)*CELL, clo=(j+.5)*CELL; list.push([i,j,ptDist(la,lo,cla,clo)]); }
-    list.sort(function(a,b){return a[2]-b[2];});
-    dl={on:true,total:list.length,done:0,stop:false}; var idx=0, tries={}, myDl=dl;
-    say('📥 Téléchargement des rues ('+list.length+' zones, environ '+Math.round(radM/1000*10)/10+' km autour). Gardez l\'application ouverte.',6000);
-    speak('Téléchargement des rues. Gardez l\'application ouverte.');
-    function worker(){
-      if(myDl.stop||idx>=list.length) return Promise.resolve();
-      var t=list[idx++];
-      return fetchStore(t[0],t[1],tries[t[0]+'_'+t[1]]||0).then(function(ok){
-        if(ok){ myDl.done++; info(); return worker(); }
-        var n=tries[t[0]+'_'+t[1]]=(tries[t[0]+'_'+t[1]]||0)+1;
-        if(n<6){ list.push(t); }  /* on réessaie plus tard */
-        else { myDl.done++; }
-        return new Promise(function(r){ setTimeout(r,3000); }).then(worker);
-      });
-    }
-    var ws=[]; for(var w=0;w<POOL;w++) ws.push(worker());
-    Promise.all(ws).then(function(){
-      myDl.on=false; info();
-      if(myDl.stop) return;
-      say('✅ Rues téléchargées : l\'alerte fonctionne maintenant sans Internet',6000); speak('Rues téléchargées. L\'alerte fonctionne maintenant sans Internet.');
-      loadView(); if(on) loadUser();
-    });
-  }
-  function around(la,lo,rad){ var ci=Math.floor(la/CELL), cj=Math.floor(lo/CELL), out=[]; for(var i=ci-rad;i<=ci+rad;i++) for(var j=cj-rad;j<=cj+rad;j++) out.push([i,j,Math.abs(i-ci)+Math.abs(j-cj)]); return out; }
-  function loadView(){
-    if(!visOn) return;
-    var z=map.getZoom();
-    if(z<14){ if(!hinted){ hinted=true; say('🔍 Zoomez (niveau 14 ou plus) pour voir les zones 🟢 vertes et 🔴 rouges',6000); } return; }
-    var b=map.getBounds(), c=map.getCenter(), cc=Math.floor(c.lat/CELL), cj=Math.floor(c.lng/CELL), list=[];
-    for(var i=Math.floor(b.getSouth()/CELL);i<=Math.floor(b.getNorth()/CELL);i++) for(var j=Math.floor(b.getWest()/CELL);j<=Math.floor(b.getEast()/CELL);j++) list.push([i,j,Math.abs(i-cc)+Math.abs(j-cj)]);
-    list.sort(function(a,b2){return a[2]-b2[2];}); runPool(list.slice(0,12));
-  }
-  function loadUser(){ if(!me) return; var l=around(me.lat,me.lon,1); l.sort(function(a,b2){return a[2]-b2[2];}); runPool(l); }
-  map.on('zoomend moveend',function(){ info(); if(visOn){ resize(); loadView(); } });
-  setInterval(function(){ if(visOn) loadView(); if(on){ loadUser(); evalPos(); } info(); checkReady(); },6000);
-  setTimeout(function(){ info(); loadView(); },800);
-
-  /* ---------- position ---------- */
-  function ptDist(a,b,c,d){ var k=111320, x=(d-b)*k*Math.cos(a*Math.PI/180), y=(c-a)*k; return Math.sqrt(x*x+y*y); }
-  function onPos(p){
-    me={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy,t:Date.now()};
-    if(!first){ first=true; map.setView([me.lat,me.lon],Math.max(map.getZoom(),18)); }
-    loadUser(); evalPos();
-  }
-  function checkReady(){
-    if(!on||!me) return;
-    var c=cells[Math.floor(me.lat/CELL)+'_'+Math.floor(me.lon/CELL)];
-    if(c&&c.d){ if(!readySaid){ readySaid=true; var n=0; for(var k in cells){ if(cells[k]&&cells[k].d) n+=cells[k].d.ways.length; } speak(n?('Alerte prête. '+n+' rues autour de vous.'):'Aucune rue trouvée autour de vous.'); } }
-    else if(Date.now()-onSince>25000&&Date.now()-errSaid>30000){ errSaid=Date.now(); speak('Attention. Les rues ne sont pas encore chargées. Alerte indisponible.'); }
-  }
-  var faultWhy='', faultT=0;
-  function fault(){
-    if(!me) return 'Position GPS introuvable';
-    if(Date.now()-me.t>10000) return 'Position GPS perdue';
-    if(me.acc>20) return 'GPS imprécis';
-    if(signed(me.lat,me.lon)===null) return 'Rues non chargées';
-    return '';
-  }
-  function evalPos(){
-    if(!me){ state='none'; return; }
-    var s=signed(me.lat,me.lon); if(s===null){ state='none'; return; } dEdge=s;
-    var ns= s<=0?'red' : s<=GREEN_M?'green' : 'none';
-    if(ns!==state){ if(ns==='green'&&state==='none') speak('Bord de rue'); if(ns==='none'&&state!=='none') speak('Zone sûre'); state=ns; if(navigator.vibrate&&ns==='red'){ try{navigator.vibrate([120,60,120]);}catch(e){} } }
-  }
-  function onErr(e){ say(e&&e.code===1?'⚠️ Autorisez la localisation / فعّل إذن الموقع':'⚠️ Position indisponible',5000); }
-
-  /* ---------- sons ---------- */
-  function beep(freq,dur){
-    if(!ac) return; wake(); try{
-      var o=ac.createOscillator(), g=ac.createGain(), t=ac.currentTime;
-      o.type='sine'; o.frequency.value=freq; o.connect(g); g.connect(ac.destination);
-      g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.6,t+0.008); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
-      o.start(t); o.stop(t+dur+0.02);
-    }catch(e){}
-  }
-  /* ---------- le son ne doit jamais se couper : oscillateur inaudible permanent + reprise automatique ---------- */
-  var keep=null;
-  function startKeep(){ try{ if(!ac||keep) return; var o=ac.createOscillator(), g=ac.createGain(); g.gain.value=0.0002; o.frequency.value=25; o.connect(g); g.connect(ac.destination); o.start(); keep=o; }catch(e){} }
-  function stopKeep(){ try{ if(keep){ keep.stop(); keep.disconnect(); } }catch(e){} keep=null; }
-  function wake(){ if(!on) return;
-    try{
-      if(!ac||ac.state==='closed'){ ac=new (window.AudioContext||window.webkitAudioContext)(); keep=null; }
-      if(ac.state!=='running') ac.resume();
-      if(!ac.__hook){ ac.__hook=true; ac.onstatechange=function(){ if(on&&ac.state!=='running'){ try{ ac.resume(); }catch(e){} } }; }
-      startKeep();
-    }catch(e){} }
-  document.addEventListener('visibilitychange',wake); window.addEventListener('focus',wake); window.addEventListener('pageshow',wake);
-  ['touchstart','click','pointerdown'].forEach(function(ev){ document.addEventListener(ev,wake,true); });
-  setInterval(wake,1500);
-
-  function tick(){
-    if(!on) return; wake(); var next=300, fw=fault();
-    if(fw){
-      beep(220,0.35); next=1500;                              /* bip GRAVE et long : ne vous fiez pas à l'alerte */
-      if(fw!==faultWhy||Date.now()-faultT>15000){ faultWhy=fw; faultT=Date.now(); speak('Attention. '+fw+'. Ne vous fiez pas à l\'alerte.'); }
-      timer=setTimeout(tick,next); return;
-    } else if(faultWhy){ faultWhy=''; speak('Alerte de nouveau fiable'); }
-    if(state==='green'){
-      var f=1-Math.max(0,Math.min(1,dEdge/GREEN_M));          /* 0 = à 1 m du rouge, 1 = au bord */
-      beep(600+300*f,0.09); next=1000-700*f;                  /* 1000 ms -> 300 ms */
-    } else if(state==='red'){
-      beep(1500,0.05); next=100;                              /* très rapide */
-    }
-    timer=setTimeout(tick,next);
+  function me(){
+    if(!navigator.geolocation){ say('⚠️ الموقع غير متاح'); return; }
+    say('⏳ تحديد موقعك…');
+    navigator.geolocation.getCurrentPosition(function(p){
+      S.city={name:'موقعي',full:'',lat:p.coords.latitude,lon:p.coords.longitude,bb:[]};
+      $('twCity').value='📍 موقعي الحالي'; say('');
+    },function(){ say('⚠️ تعذّر تحديد الموقع'); },{enableHighAccuracy:true,timeout:10000});
   }
 
-  /* ---------- activation ---------- */
-  function setOn(v){
-    on=v; btn.setAttribute('aria-pressed',v?'true':'false'); btn.style.outline=v?'3px solid #fff':'';
-    btn.setAttribute('aria-label','Alerte trottoir : '+(v?'activée':'désactivée'));
-    if(v){
-      try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)(); if(ac.state==='suspended') ac.resume(); startKeep(); }catch(e){}
-      if(!navigator.geolocation){ say('⚠️ Géolocalisation non supportée',4000); return; }
-      onSince=Date.now(); readySaid=false; errSaid=0;
-      if(watchId==null) watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:500,timeout:15000});
-      say('🦯 Alerte activée — 🟢 bip lent : 1 m du bord · 🔴 bip rapide : chaussée',5000); speak('Alerte trottoir activée');
-      clearTimeout(timer); tick(); if(me){ map.setView([me.lat,me.lon],Math.max(map.getZoom(),18)); loadUser(); }
-    } else {
-      if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
-      clearTimeout(timer); stopKeep(); state='none'; say('🦯 Alerte désactivée',2500); speak('Alerte trottoir désactivée');
-    }
-  }
-  btn.onclick=function(){ setOn(!on); };
-  window.safeZones={signed:signed,state:function(){return state;}};
+  var ch=$('twCh');
+  PRESETS.forEach(function(p){
+    var b=document.createElement('button'); b.type='button'; b.textContent=p.t;
+    b.addEventListener('click',function(){ $('twC').value=p.c; if(p.l) $('twLang').value=p.l; S.city=null; $('twCity').value=p.q; go(); });
+    ch.appendChild(b);
+  });
+  btn.addEventListener('click',function(){ panel.style.display=panel.style.display==='block'?'none':'block'; });
+  $('twX').addEventListener('click',function(){ panel.style.display='none'; });
+  $('twCfg').addEventListener('click',function(){ var f=$('twForm'); f.style.display=f.style.display==='none'?'block':'none'; });
+  $('twGo').addEventListener('click',go);
+  $('twMe').addEventListener('click',me);
+  $('twPrev').addEventListener('click',function(){ if(S.stops.length) playStop(Math.max(0,T.i-1)); });
+  $('twNext').addEventListener('click',function(){ if(S.stops.length) playStop(Math.min(S.stops.length-1,T.i+1)); });
+  $('twPause').addEventListener('click',function(){
+    if(!S.stops.length) return;
+    if(T.paused){ playStop(Math.max(0,T.i)); } else { T.tok++; T.paused=true; hush(); setCtl(); }
+  });
+  $('twStop').addEventListener('click',function(){ stopTour(); clear(); $('twForm').style.display='block'; $('twCfg').style.display='none'; say(''); });
+  window.addEventListener('pagehide',hush);
 })();
 </script>
 </body>
